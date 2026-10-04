@@ -431,6 +431,8 @@ struct PipelineStore {
     std::uint64_t misses = 0;
     std::uint64_t uncached = 0;
     std::uint64_t evicted = 0;
+    double creationMs = 0.0;
+    double maxCreationMs = 0.0;
     std::chrono::steady_clock::time_point lastReport = std::chrono::steady_clock::now();
 };
 
@@ -457,8 +459,9 @@ void reportPipelines(PipelineStore& store) {
     if (now - store.lastReport < std::chrono::seconds(10)) return;
     store.lastReport = now;
     const auto lookups = store.hits + store.misses + store.uncached;
-    aps5::LogErr( "[pipecache] %llu lookups over 10 s: %llu hits (%.0f%%), %llu misses, %llu private (no variant id), %llu evicted, %zu cached\n", static_cast<unsigned long long>(lookups), static_cast<unsigned long long>(store.hits), lookups != 0 ? 100.0 * static_cast<double>(store.hits) / static_cast<double>(lookups) : 0.0, static_cast<unsigned long long>(store.misses), static_cast<unsigned long long>(store.uncached), static_cast<unsigned long long>(store.evicted), store.entries.size());
+    aps5::LogErr( "[pipecache] %llu lookups over 10 s: %llu hits (%.0f%%), %llu misses, %llu private (no variant id), %llu evicted, %zu cached; pipeline creation %.1f ms total, %.1f ms max\n", static_cast<unsigned long long>(lookups), static_cast<unsigned long long>(store.hits), lookups != 0 ? 100.0 * static_cast<double>(store.hits) / static_cast<double>(lookups) : 0.0, static_cast<unsigned long long>(store.misses), static_cast<unsigned long long>(store.uncached), static_cast<unsigned long long>(store.evicted), store.entries.size(), store.creationMs, store.maxCreationMs);
     store.hits = store.misses = store.uncached = store.evicted = 0;
+    store.creationMs = store.maxCreationMs = 0.0;
 }
 
 }
@@ -496,7 +499,11 @@ std::shared_ptr<Pipeline> CachedPipeline(const Context& context, const State& st
     for (auto it = store.entries.begin(); it != store.entries.end();) {
         it = alive(*it, context) ? std::next(it) : abandon(store, it);
     }
+    const auto creationStart = std::chrono::steady_clock::now();
     auto pipeline = std::make_shared<Pipeline>(context, state, vertexInput, resources, shaders, attachmentLayout);
+    const auto creationMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - creationStart).count();
+    store.creationMs += creationMs;
+    store.maxCreationMs = std::max(store.maxCreationMs, creationMs);
     store.entries.push_back({context.device, context.bufferPool, hash, key, pipeline});
     store.index[hash] = std::prev(store.entries.end());
     constexpr std::size_t bound = 256;
