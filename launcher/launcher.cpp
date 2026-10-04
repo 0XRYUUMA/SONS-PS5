@@ -101,6 +101,46 @@ FILETIME WriteTime(const std::wstring& path) {
     return data.ftLastWriteTime;
 }
 
+long long FileSize(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data)) return -1;
+    return (static_cast<long long>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+}
+
+std::wstring FinalPath(const std::wstring& path) {
+    HANDLE handle = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return L"";
+    wchar_t buffer[2048];
+    const DWORD length = GetFinalPathNameByHandleW(handle, buffer, 2048, VOLUME_NAME_DOS);
+    CloseHandle(handle);
+    if (length == 0 || length >= 2048) return L"";
+    std::wstring result = buffer;
+    for (auto& character : result) character = static_cast<wchar_t>(towlower(character));
+    return result;
+}
+
+std::wstring PreparedStamp(const std::wstring& directory, const std::wstring& source) {
+    return L"1 " + std::to_wstring(FileSize(source)) + L" " + std::to_wstring(FileSize(directory + L"\\tools\\relinker.exe"));
+}
+
+std::wstring ReadStamp(const std::wstring& path) {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"r") != 0 || file == nullptr) return L"";
+    wchar_t line[256] = {};
+    fgetws(line, 256, file);
+    fclose(file);
+    std::wstring text = line;
+    while (!text.empty() && (text.back() == L'\n' || text.back() == L'\r')) text.pop_back();
+    return text;
+}
+
+void WriteStamp(const std::wstring& path, const std::wstring& text) {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"w") != 0 || file == nullptr) return;
+    fputws(text.c_str(), file);
+    fclose(file);
+}
+
 bool IsElf(const std::wstring& path) {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (file == INVALID_HANDLE_VALUE) return false;
@@ -320,7 +360,12 @@ void PrepareModules(const std::wstring& directory, const std::wstring& prep, std
 
 void LinkIntoApp0(const std::wstring& directory, const wchar_t* name) {
     const std::wstring link = directory + L"\\app0\\" + name;
-    if (Exists(link) || !Exists(directory + L"\\" + name)) return;
+    if (!Exists(directory + L"\\" + name)) return;
+    if (Exists(link)) {
+        if (FinalPath(link) == FinalPath(directory + L"\\" + name)) return;
+        RemoveDirectoryW(link.c_str());
+        if (Exists(link)) return;
+    }
     CreateDirectoryW((directory + L"\\app0").c_str(), nullptr);
     RunHidden(L"cmd.exe /c mklink /J \"" + link + L"\" \"" + directory + L"\\" + name + L"\"", directory, directory + L"\\logs\\link.log");
 }
@@ -431,10 +476,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
     CreateDirectoryW((directory + L"\\logs").c_str(), nullptr);
     const std::wstring runtime = directory + L"\\" + kRuntime;
-    const FILETIME runtimeTime = WriteTime(runtime);
-    const FILETIME elfTime = WriteTime(executable);
-    const FILETIME relinkerTime = WriteTime(directory + L"\\tools\\relinker.exe");
-    const bool stale = !Exists(runtime) || CompareFileTime(&runtimeTime, &elfTime) < 0 || CompareFileTime(&runtimeTime, &relinkerTime) < 0;
+    const std::wstring stampFile = directory + L"\\prep\\prepared.stamp";
+    const std::wstring stampNow = PreparedStamp(directory, executable);
+    const std::wstring stampOld = ReadStamp(stampFile);
+    if (Exists(runtime) && stampOld.empty()) WriteStamp(stampFile, stampNow);
+    const bool stale = !Exists(runtime) || (!stampOld.empty() && stampOld != stampNow);
     if (stale) {
         Splash splash;
         splash.Start();
@@ -449,6 +495,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         splash.Status(L"Building the game program (the longest step)...");
         SetFileAttributesW(runtime.c_str(), FILE_ATTRIBUTE_NORMAL);
         DeleteFileW(runtime.c_str());
+        const std::wstring registry = directory + L"\\" + std::wstring(kRuntime, wcslen(kRuntime) - 4) + L".registry.json";
+        SetFileAttributesW(registry.c_str(), FILE_ATTRIBUTE_NORMAL);
+        DeleteFileW(registry.c_str());
         const std::wstring command = L"\"" + directory + L"\\tools\\relinker.exe\" --windows --registry --windows-diagnostics "
 
         L"--skip-syscall-check --exclude-sce-module CommonDialog.prx --exclude-sce-module VoiceInputPlugin.prx --exclude-sce-module libSceNpCppWebApi.prx "
@@ -463,7 +512,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
         MoveFileExW((directory + L"\\windows-diagnostics-imports.txt").c_str(), (directory + L"\\logs\\windows-diagnostics-imports.txt").c_str(), MOVEFILE_REPLACE_EXISTING);
         SetFileAttributesW(runtime.c_str(), FILE_ATTRIBUTE_HIDDEN);
-        SetFileAttributesW((directory + L"\\" + std::wstring(kRuntime, wcslen(kRuntime) - 4) + L".registry.json").c_str(), FILE_ATTRIBUTE_HIDDEN);
+        SetFileAttributesW(registry.c_str(), FILE_ATTRIBUTE_HIDDEN);
+        WriteStamp(stampFile, stampNow);
     }
 
     for (const wchar_t* name : {L"Media", L"sce_sys"}) LinkIntoApp0(directory, name);
