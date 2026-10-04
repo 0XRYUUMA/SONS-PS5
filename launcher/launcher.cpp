@@ -2,9 +2,11 @@
 #define UNICODE
 #endif
 #include <windows.h>
+#include <commctrl.h>
 #include <objidl.h>
 #include <shlobj.h>
 #include <algorithm>
+#include <cwchar>
 #include <string>
 #include <vector>
 using std::max;
@@ -373,17 +375,155 @@ void LinkIntoApp0(const std::wstring& directory, const wchar_t* name) {
 }
 
 struct Splash {
+    static constexpr UINT kCloseMessage = WM_APP + 1;
+    static constexpr UINT_PTR kTimer = 1;
+    static constexpr UINT kGetDpiScaledSize = 0x02E4;  // WM_GETDPISCALEDSIZE (Windows 10 1703+), not declared for the default WINVER
+    // The layout stops growing at 175%; the window stays DPI aware, so above that it keeps its 175% size and text is still drawn sharply.
+    static constexpr UINT kMaxLayoutDpi = 168;
     HANDLE thread = nullptr;
     HWND window = nullptr;
     HANDLE ready = nullptr;
     HWND status = nullptr;
+    HWND title = nullptr, intro = nullptr, progress = nullptr, elapsed = nullptr, note = nullptr;
+    HFONT fonts[5] = {};
+    ULONGLONG started = 0, shown = ~0ull;
+    UINT currentDpi = USER_DEFAULT_SCREEN_DPI;
+    template <typename Function> static Function User32(const char* name) {
+        return reinterpret_cast<Function>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"user32.dll"), name)));
+    }
+    static UINT Dpi(HWND hwnd) {
+        static const auto forWindow = User32<UINT(WINAPI*)(HWND)>("GetDpiForWindow");
+        UINT dpi = forWindow != nullptr ? forWindow(hwnd) : 0;
+        if (dpi == 0) {
+            HDC screen = GetDC(nullptr);
+            dpi = static_cast<UINT>(GetDeviceCaps(screen, LOGPIXELSY));
+            ReleaseDC(nullptr, screen);
+        }
+        return dpi != 0 ? dpi : USER_DEFAULT_SCREEN_DPI;
+    }
+    static int LayoutDpi(UINT dpi) { return static_cast<int>(min(dpi, kMaxLayoutDpi)); }
+    // Grows a client rectangle to the window rectangle; the caption and borders follow the real DPI.
+    void Frame(RECT* rect, UINT dpi) const {
+        const DWORD style = static_cast<DWORD>(GetWindowLongW(window, GWL_STYLE)), exStyle = static_cast<DWORD>(GetWindowLongW(window, GWL_EXSTYLE));
+        static const auto adjust = User32<BOOL(WINAPI*)(RECT*, DWORD, BOOL, DWORD, UINT)>("AdjustWindowRectExForDpi");
+        if (adjust == nullptr || !adjust(rect, style, FALSE, exStyle, dpi)) AdjustWindowRectEx(rect, style, FALSE, exStyle);
+    }
+    // Because of the cap the size is not proportional to the DPI, so Windows is told the size the window will get on the new monitor.
+    SIZE ScaledSize(UINT dpi) const {
+        RECT client{};
+        GetClientRect(window, &client);
+        RECT frame{0, 0, MulDiv(client.right, LayoutDpi(dpi), LayoutDpi(currentDpi)), MulDiv(client.bottom, LayoutDpi(dpi), LayoutDpi(currentDpi))};
+        Frame(&frame, dpi);
+        return SIZE{frame.right - frame.left, frame.bottom - frame.top};
+    }
+    // Everything is laid out in 96-DPI units scaled by the capped layout DPI; label heights come from measuring their text.
+    void Layout(UINT dpi, const RECT* suggested) {
+        currentDpi = dpi;
+        auto scale = [layoutDpi = LayoutDpi(dpi)](int value) { return MulDiv(value, layoutDpi, USER_DEFAULT_SCREEN_DPI); };
+        // GDI only fakes FW_SEMIBOLD for "Segoe UI", so the real semibold face is named; "Please keep this window open" alone is bold.
+        auto font = [&](int size, int weight, const wchar_t* face) {
+            return CreateFontW(-scale(size), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, face);
+        };
+        decltype(fonts) old;
+        std::copy(std::begin(fonts), std::end(fonts), old);
+        fonts[0] = font(22, FW_SEMIBOLD, L"Segoe UI Semibold");
+        fonts[1] = font(15, FW_SEMIBOLD, L"Segoe UI Semibold");
+        fonts[2] = font(15, FW_NORMAL, L"Segoe UI");
+        fonts[3] = font(13, FW_NORMAL, L"Segoe UI");
+        fonts[4] = font(13, FW_BOLD, L"Segoe UI");
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(monitor);
+        GetMonitorInfoW(suggested != nullptr ? MonitorFromRect(suggested, MONITOR_DEFAULTTONEAREST) : MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY), &monitor);
+        const RECT work = monitor.rcWork;
+        const int margin = scale(24), width = min(scale(500), static_cast<int>(work.right - work.left) - scale(32)) - 2 * margin;
+        const struct { HWND control; HFONT font; int gap; } items[] = {
+            {title, fonts[0], 0}, {intro, fonts[2], 10}, {progress, nullptr, 24}, {status, fonts[1], 16}, {elapsed, fonts[3], 2}, {note, fonts[4], 20}};
+        HDC dc = GetDC(window);
+        int y = margin;
+        for (const auto& item : items) {
+            y += scale(item.gap);
+            int height = scale(14);
+            if (item.font != nullptr) {
+                SendMessageW(item.control, WM_SETFONT, reinterpret_cast<WPARAM>(item.font), FALSE);
+                wchar_t text[512] = {};
+                GetWindowTextW(item.control, text, 512);
+                const bool single = (GetWindowLongW(item.control, GWL_STYLE) & SS_ENDELLIPSIS) != 0;
+                RECT bounds{0, 0, width, 0};
+                HGDIOBJ previous = SelectObject(dc, item.font);
+                DrawTextW(dc, text[0] != 0 ? text : L"X", -1, &bounds, DT_CALCRECT | DT_NOPREFIX | DT_EXPANDTABS | (single ? DT_SINGLELINE : DT_WORDBREAK));
+                SelectObject(dc, previous);
+                height = bounds.bottom;
+            }
+            MoveWindow(item.control, margin, y, width, height, FALSE);
+            y += height;
+        }
+        ReleaseDC(window, dc);
+        for (HFONT font : old) if (font != nullptr) DeleteObject(font);
+        const int clientWidth = width + 2 * margin, clientHeight = y + margin;
+        RECT frame{0, 0, clientWidth, clientHeight};
+        Frame(&frame, dpi);
+        const int windowWidth = frame.right - frame.left, windowHeight = frame.bottom - frame.top;
+        const int x = suggested != nullptr ? suggested->left : work.left + max(0, static_cast<int>(work.right - work.left) - windowWidth) / 2;
+        const int top = suggested != nullptr ? suggested->top : work.top + max(0, static_cast<int>(work.bottom - work.top) - windowHeight) / 2;
+        SetWindowPos(window, nullptr, x, top, windowWidth, windowHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+        // If the frame the system draws differs from the computed one, correct the size once so the client area fits the content exactly.
+        RECT client{};
+        GetClientRect(window, &client);
+        if (client.right != clientWidth || client.bottom != clientHeight)
+            SetWindowPos(window, nullptr, 0, 0, windowWidth + clientWidth - client.right, windowHeight + clientHeight - client.bottom, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
+        RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    }
+    void Tick() {
+        const ULONGLONG seconds = (GetTickCount64() - started) / 1000;
+        if (seconds == shown) return;
+        shown = seconds;
+        wchar_t text[64];
+        const unsigned hours = static_cast<unsigned>(seconds / 3600), minutes = static_cast<unsigned>(seconds / 60 % 60), rest = static_cast<unsigned>(seconds % 60);
+        if (hours == 0) std::swprintf(text, 64, L"Elapsed time: %02u:%02u", minutes, rest);
+        else std::swprintf(text, 64, L"Elapsed time: %u:%02u:%02u", hours, minutes, rest);
+        SetWindowTextW(elapsed, text);
+    }
     static LRESULT CALLBACK Proc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
-        if (message == WM_CLOSE) return 0;
-        if (message == WM_DESTROY) { PostQuitMessage(0); return 0; }
+        if (message == WM_NCCREATE) SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(lParam)->lpCreateParams));
+        auto* self = reinterpret_cast<Splash*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        switch (message) {
+        case WM_CLOSE: return 0;
+        case kCloseMessage: DestroyWindow(hwnd); return 0;
+        case WM_DESTROY: KillTimer(hwnd, kTimer); PostQuitMessage(0); return 0;
+        case WM_TIMER:
+            if (wParam == kTimer && self != nullptr) self->Tick();
+            return 0;
+        case kGetDpiScaledSize:
+            if (self == nullptr) break;
+            *reinterpret_cast<SIZE*>(lParam) = self->ScaledSize(static_cast<UINT>(wParam));
+            return TRUE;
+        case WM_DPICHANGED:
+            if (self != nullptr) self->Layout(HIWORD(wParam), reinterpret_cast<const RECT*>(lParam));
+            return 0;
+        case WM_CTLCOLORSTATIC: {
+            // Labels share the window background instead of the default grey; secondary text is muted unless high contrast is on.
+            HDC dc = reinterpret_cast<HDC>(wParam);
+            const HWND control = reinterpret_cast<HWND>(lParam);
+            HIGHCONTRASTW contrast{};
+            contrast.cbSize = sizeof(contrast);
+            const bool highContrast = SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0) && (contrast.dwFlags & HCF_HIGHCONTRASTON) != 0;
+            const bool muted = self != nullptr && (control == self->intro || control == self->elapsed);
+            SetTextColor(dc, muted && !highContrast ? RGB(0x5c, 0x5c, 0x5c) : GetSysColor(COLOR_WINDOWTEXT));
+            SetBkColor(dc, GetSysColor(COLOR_WINDOW));
+            return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+        }
+        }
         return DefWindowProcW(hwnd, message, wParam, lParam);
     }
     static DWORD WINAPI Run(LPVOID parameter) {
         auto* self = static_cast<Splash*>(parameter);
+        // Only this UI thread becomes per-monitor DPI aware, so the window is drawn sharply at the real scaling while the rest of the
+        // launcher keeps its DPI mode. Windows before 10 1607 lack the API and keep scaling the window as a bitmap, as before.
+        if (const auto aware = User32<DPI_AWARENESS_CONTEXT(WINAPI*)(DPI_AWARENESS_CONTEXT)>("SetThreadDpiAwarenessContext")) {
+            if (aware(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) == nullptr) aware(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+        }
+        INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_PROGRESS_CLASS};
+        InitCommonControlsEx(&controls);
         WNDCLASSW windowClass{};
         windowClass.lpfnWndProc = Proc;
         windowClass.hInstance = GetModuleHandleW(nullptr);
@@ -391,34 +531,52 @@ struct Splash {
         windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
         RegisterClassW(&windowClass);
-        const int width = 560, height = 240;
-        self->window = CreateWindowExW(WS_EX_TOPMOST, windowClass.lpszClassName, LAUNCHER_TITLE, WS_CAPTION | WS_VISIBLE, (GetSystemMetrics(SM_CXSCREEN) - width) / 2, (GetSystemMetrics(SM_CYSCREEN) - height) / 2, width, height, nullptr, nullptr, windowClass.hInstance, nullptr);
-        HFONT font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-        auto label = [&](const wchar_t* text, int y, int h) {
-            HWND control = CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE, 20, y, width - 56, h, self->window, nullptr, windowClass.hInstance, nullptr);
-            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-            return control;
+        // Created hidden on the primary monitor so its DPI is known before the final size and position are chosen.
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(monitor);
+        GetMonitorInfoW(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), &monitor);
+        self->window = CreateWindowExW(WS_EX_TOPMOST, windowClass.lpszClassName, LAUNCHER_TITLE, WS_CAPTION, monitor.rcWork.left, monitor.rcWork.top, 0, 0, nullptr, nullptr, windowClass.hInstance, self);
+        if (self->window == nullptr) {
+            SetEvent(self->ready);
+            return 0;
+        }
+        auto label = [&](const wchar_t* text, DWORD style) {
+            return CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_NOPREFIX | style, 0, 0, 0, 0, self->window, nullptr, windowClass.hInstance, nullptr);
         };
-        label(L"Getting ready for the first start", 14, 24);
-        label(L"The game is being prepared from your own files. This happens only once, takes about two minutes and needs no internet. "
-              L"The game window opens by itself when it is done - please do not close this program.", 44, 90);
-        self->status = label(L"Converting game files...", 150, 24);
+        self->title = label(L"Preparing the game for first launch", 0);
+        self->intro = label(L"The game is being prepared from your own files\nThis only happens once, usually takes around two minutes\nand does not require an internet connection", 0);
+        self->progress = CreateWindowExW(0, PROGRESS_CLASSW, nullptr, WS_CHILD | WS_VISIBLE | PBS_MARQUEE, 0, 0, 0, 0, self->window, nullptr, windowClass.hInstance, nullptr);
+        SendMessageW(self->progress, PBM_SETMARQUEE, TRUE, 0);
+        self->status = label(L"Preparing game modules...", SS_ENDELLIPSIS);
+        self->elapsed = label(L"", SS_ENDELLIPSIS);
+        self->note = label(L"Please keep this window open", 0);
+        self->Tick();
+        self->Layout(Dpi(self->window), nullptr);
+        SetTimer(self->window, kTimer, 250, nullptr);
+        ShowWindow(self->window, SW_SHOW);
         SetEvent(self->ready);
         MSG message;
         while (GetMessageW(&message, nullptr, 0, 0) > 0) { TranslateMessage(&message); DispatchMessageW(&message); }
+        for (HFONT font : self->fonts) if (font != nullptr) DeleteObject(font);
         return 0;
     }
     void Start() {
+        started = GetTickCount64();
         ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         thread = CreateThread(nullptr, 0, Run, this, 0, nullptr);
         WaitForSingleObject(ready, 5000);
     }
+    // WM_SETTEXT from this thread is sent to the UI thread and handled there.
     void Status(const wchar_t* text) { if (status != nullptr) SetWindowTextW(status, text); }
-    ~Splash() {
-        if (window != nullptr) PostMessageW(window, WM_DESTROY, 0, 0);
+    // Destroying the window on its own thread also stops the timer and the progress animation; safe to call more than once.
+    void Close() {
+        if (window != nullptr) PostMessageW(window, kCloseMessage, 0, 0);
         if (thread != nullptr) { WaitForSingleObject(thread, 2000); CloseHandle(thread); }
         if (ready != nullptr) CloseHandle(ready);
+        thread = ready = nullptr;
+        window = status = nullptr;
     }
+    ~Splash() { Close(); }
 };
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
@@ -488,11 +646,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             std::wstring failed;
             PrepareModules(directory, directory + L"\\prep", failed);
             if (!failed.empty()) {
+                splash.Close();
                 Fail(L"Some game modules could not be converted (" + failed + L").\n\nThey must be decrypted files from your own copy of the game.");
                 return 1;
             }
         }
-        splash.Status(L"Building the game program (the longest step)...");
+        splash.Status(L"Building the game program...");
         SetFileAttributesW(runtime.c_str(), FILE_ATTRIBUTE_NORMAL);
         DeleteFileW(runtime.c_str());
         const std::wstring registry = directory + L"\\" + std::wstring(kRuntime, wcslen(kRuntime) - 4) + L".registry.json";
@@ -505,6 +664,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         L"\"" + executable + L"\" \"" + runtime + L"\"";
         const long code = RunHidden(command, directory, directory + L"\\logs\\prepare.log");
         if (code != 0 || !Exists(runtime)) {
+            splash.Close();
             Fail(L"The game could not be prepared from your files (exit code " + std::to_wstring(code) + L").\n\nSee logs\\prepare.log. "
                  L"Make sure eboot.elf is the decrypted executable of " LAUNCHER_NAME L" (" LAUNCHER_TITLE_ID L").");
             return 1;
