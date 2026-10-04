@@ -10,7 +10,7 @@ Made possible by the [AnyPS5](https://github.com/boykopovar/AnyPS5) project. The
 1. Download `SonsOfSparta-PS5-Native-0.1.0-win64.zip` and extract it anywhere.
 2. Copy **your own** decrypted game files into the same folder as `SonsOfSparta-PS5.exe`:
    `eboot.bin` (or a decrypted `eboot.elf`), `sce_sys`, `sce_module` and `Media`.
-3. Double-click `SonsOfSparta-PS5.exe`.
+3. Double-click `SonsOfSparta-PS5.exe`, check the settings and press **Play**.
 
 Nothing to install. The very first start prepares the game from your files: a small window explains it and it takes about two minutes. Later starts are fast. Your own files are never modified.
 
@@ -44,8 +44,14 @@ Any XInput/DualSense/DualShock gamepad works. Keyboard, mouse and gamepad can be
 
 F11 toggles fullscreen. The middle mouse button turns mouse-aim mode on or off (the mouse is captured and drives the right stick).
 
-## Resolution
-The game draws its scene at 4K by default and scales it to your window, which is heavy on weaker graphics cards. To lower it, create a text file named `resolution.txt` next to `SonsOfSparta-PS5.exe` containing one word: `1080p`, `1440p` or `4k`. Delete the file to leave the game's own setting alone. The choice is applied every time you start the game, including the very first start. The window size is not affected.
+## Display settings
+The window that opens when you start `SonsOfSparta-PS5.exe` has two display settings. Press Play to save them; they are kept for later starts.
+
+**Display mode:** Windowed or Borderless Fullscreen. With Borderless Fullscreen, the launcher switches the game window to fullscreen once it appears, the same as pressing F11. F11 still switches between the two while playing. The choice is stored in `launcher.ini`.
+
+**Resolution:** the game draws its scene at 4K by default and scales it to your window, which is heavy on weaker graphics cards. To lower it, choose 2560 x 1440 or 1920 x 1080. The choice is saved in the game's own settings. The window size is not affected.
+
+If you created `resolution.txt` with an earlier version, its value is preselected in that window. Once you press Play and the choice is saved, the file is renamed to `resolution.txt.old`.
 
 ## Known issues
 - **First play builds shaders:** the first time you play, shaders are built while you play, so you may see visual glitches (missing or wrong-looking effects, brief stutters) until they are cached. This gets better on later runs.
