@@ -36,3 +36,12 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build --target libs relinker SonsOfSparta-PS5 --parallel 2
+      - name: Package
+        shell: pwsh
+        run: ./tools/package.ps1
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: SonsOfSparta-PS5-Native-win64
+          path: release/SonsOfSparta-PS5-Native-0.1.0-win64/
+          if-no-files-found: error
