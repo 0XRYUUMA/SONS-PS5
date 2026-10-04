@@ -44,6 +44,9 @@ Any XInput/DualSense/DualShock gamepad works. Keyboard, mouse and gamepad can be
 
 F11 toggles fullscreen. The middle mouse button turns mouse-aim mode on or off (the mouse is captured and drives the right stick).
 
+## Resolution
+The game draws its scene at 4K by default and scales it to your window, which is heavy on weaker graphics cards. To lower it, create a text file named `resolution.txt` next to `SonsOfSparta-PS5.exe` containing one word: `1080p`, `1440p` or `4k`. Delete the file to leave the game's own setting alone. The choice is applied every time you start the game, including the very first start. The window size is not affected.
+
 ## Known issues
 - **First play builds shaders:** the first time you play, shaders are built while you play, so you may see visual glitches (missing or wrong-looking effects, brief stutters) until they are cached. This gets better on later runs.
 - The intro video sometimes shows a dark frozen picture for about 10s, then continues to the menu by itself.

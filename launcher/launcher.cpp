@@ -32,6 +32,64 @@ void Fail(const std::wstring& text) {
 
 bool Exists(const std::wstring& path) { return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES; }
 
+const unsigned char kSettingsHeader[12] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x00, 0x00};
+const char kSettingsBody[] = R"json(ersion":"0.1","globalSaveDataV1ref":{"previouslyBootedGame":true,"previouslySavedDifficultyLevel":0,"previouslyInitializedToDefaults":true,"vsyncOn":false,"isPitUnlocked":false,"previouslySelectedSaveSlotIndex":-1,"masterAudioVolume":0.0,"sfxAudioVolume":0.0,"bgmAudioVolume":0.0,"keybindingsOverride":"","pitData":"","hasBeatenGame":false,"aimAssist":0,"enablePuzzleAimAssist":false,"puzzleTiming":0,"hintsEnabled":true,"hintWaitDuration":1,"disableTutorial":true,"GuidedExperience":true,"GameDifficulty":1,"viewControls":false,"AutoPickupEnabled":false,"menuHolds":0,"repeatedButtonPress":0,"traversalInputs":0,"cinematicSkip":false,"touchpadButton":3,"swipeUp":0,"swipeLeft":0,"swipeRight":0,"swipeDown":0,"controllerVisualization":false,"visualizationContrast":0,"hudCustomization":0,"combatHUD":1,"aimReticle":1,"bossHealthBars":1,"enemyHealthBars":1,"gameplayNotificationToggle":1,"volumeBalance":0,"outputDevice":0,"monoAudioSystemIntegratedSupport":false,"globalVolume":10.0,"dialogueVolume":10.0,"musicVolume":10.0,"sfxVolume":10.0,"controllerSpeakerVolume":10.0,"enableSubtitles":true,"subtitleTextColor":0,"displaySpeakerName":true,"speakerTextColor":0,"enableCaptions":false,"captionTextColor":0,"subtitleAndCaptionTextSize":0,"blurSubtitleAndCaptionBackground":false,"subtitleAndCaptionBackground":1,"audioCue":false,"audioCueVolume":10.0,"audioPanning":0.0,"centerPanDialogue":false,"voiceBoost":false,"uiTextSize":0,"iconSize":0,"highContrastHUD":0,"colorFilter":0,"filterStrength":10.0,"highContrastDisplay":0,"HeroColor":0,"CompanionColor":0,"BossColor":0,"EnemyColor":0,"NPCColor":0,"TargetColor":0,"InteractColor":0,"HazardColor":0,"traversalColor":0,"backgroundColor":0,"enableVsync":true,"screenCalibration":false,"filterMode":0,"enableBloodAndGore":0,"enableBrutalKillPrompt":true,"enableBloodVFX":true,"enableCorpseBloodVFX":true,"fullScreenMode":0,"resolutionIndex":0,"aspectRatio":0,"cameraPanningSpeed":10,"cameraShakeIntensity":10,"activationToggle":false,"horizontalSpeed":0,"verticalSpeed":0,"accelerationSpeed":0,"reduceSmallMotions":0,"textLanguage":0,"speechLanguage":0,"controllerVibration":2,"enableAimToggling":false,"enableBlockToggling":false,"enableHDR":true,"gammaValue":50.5,"brightnessValue":50.5,"personalRecordSpeedrunDataBoy":{"isValid":false,"overallTime":0.0},"chapterBestSpeedrunDataBoy":{"isValid":false,"overallTime":0.0},"personalRecordSpeedrunDataCadet":{"isValid":false,"overallTime":0.0},"chapterBestSpeedrunDataCadet":{"isValid":false,"overallTime":0.0},"personalRecordSpeedrunDataSpartan":{"isValid":false,"overallTime":0.0},"chapterBestSpeedrunDataSpartan":{"isValid":false,"overallTime":0.0},"version":2}})json";
+
+bool SeedSettings(const std::wstring& directory) {
+    CreateDirectoryW((directory + L"\\_sd").c_str(), nullptr);
+    CreateDirectoryW((directory + L"\\_sd\\GOWSOSSAVE999").c_str(), nullptr);
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, (directory + L"\\_sd\\GOWSOSSAVE999\\GoW_SoS999.dat").c_str(), L"wb") != 0 || file == nullptr) return false;
+    fwrite(kSettingsHeader, 1, sizeof(kSettingsHeader), file);
+    for (size_t i = 0; kSettingsBody[i] != 0; ++i) {
+        const unsigned char unit[4] = {static_cast<unsigned char>(kSettingsBody[i]), 0, 0, 0};
+        fwrite(unit, 1, 4, file);
+    }
+    fclose(file);
+    return true;
+}
+
+void ApplyResolution(const std::wstring& directory) {
+    FILE* choice = nullptr;
+    if (_wfopen_s(&choice, (directory + L"\\resolution.txt").c_str(), L"r") != 0 || choice == nullptr) return;
+    char word[32] = {};
+    fgets(word, sizeof(word), choice);
+    fclose(choice);
+    std::string value = word;
+    for (auto& character : value) character = static_cast<char>(tolower(static_cast<unsigned char>(character)));
+    char wanted = 0;
+    if (value.rfind("1080", 0) == 0) wanted = '8';
+    else if (value.rfind("1440", 0) == 0) wanted = '6';
+    else if (value.rfind("4k", 0) == 0 || value.rfind("2160", 0) == 0) wanted = '0';
+    if (wanted == 0) return;
+    const std::wstring path = directory + L"\\_sd\\GOWSOSSAVE999\\GoW_SoS999.dat";
+    FILE* file = nullptr;
+    if (!Exists(path) && !SeedSettings(directory)) return;
+    if (_wfopen_s(&file, path.c_str(), L"rb") != 0 || file == nullptr) return;
+    std::vector<unsigned char> data;
+    unsigned char buffer[4096];
+    size_t count;
+    while ((count = fread(buffer, 1, sizeof(buffer), file)) > 0) data.insert(data.end(), buffer, buffer + count);
+    fclose(file);
+    const char key[] = "\"resolutionIndex\":";
+    std::vector<unsigned char> pattern;
+    for (size_t i = 0; key[i] != 0; ++i) {
+        pattern.push_back(static_cast<unsigned char>(key[i]));
+        pattern.insert(pattern.end(), 3, 0);
+    }
+    const auto found = std::search(data.begin(), data.end(), pattern.begin(), pattern.end());
+    if (found == data.end()) return;
+    const size_t at = static_cast<size_t>(found - data.begin()) + pattern.size();
+    if (at + 8 > data.size()) return;
+    const bool digit = data[at] >= '0' && data[at] <= '9' && data[at + 1] == 0 && data[at + 2] == 0 && data[at + 3] == 0;
+    const bool longer = data[at + 4] >= '0' && data[at + 4] <= '9' && data[at + 5] == 0;
+    if (!digit || longer || data[at] == static_cast<unsigned char>(wanted)) return;
+    data[at] = static_cast<unsigned char>(wanted);
+    if (_wfopen_s(&file, path.c_str(), L"wb") != 0 || file == nullptr) return;
+    fwrite(data.data(), 1, data.size(), file);
+    fclose(file);
+}
+
 bool IsDirectory(const std::wstring& path) {
     const auto attributes = GetFileAttributesW(path.c_str());
     return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
@@ -440,6 +498,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
     const std::wstring pipelineCache = directory + L"\\pipeline_cache.bin";
     SetFileAttributesW(pipelineCache.c_str(), FILE_ATTRIBUTE_NORMAL);
+    ApplyResolution(directory);
     {
 
         FILE* debug = nullptr;
