@@ -101,18 +101,21 @@ void PipelineCache::load(std::vector<std::byte>& initialData) {
     if (vulkan.headerSize < sizeof(vulkan) || vulkan.headerVersion != VK_PIPELINE_CACHE_HEADER_VERSION_ONE || vulkan.vendorID != properties.vendorID || vulkan.deviceID != properties.deviceID || std::memcmp(vulkan.uuid, properties.pipelineCacheUUID, VK_UUID_SIZE) != 0) return reject("made for another device or driver");
     initialData.assign(data.begin(), data.end());
     savedBytes = initialData.size();
+    savedHash = header.dataHash;
     aps5::LogErr( "[pipeline-cache] loaded %.1f KiB from %s\n", static_cast<double>(initialData.size()) / 1024.0, path.string().c_str());
 }
 
 void PipelineCache::save(bool final) {
     const auto getData = context.Function<PFN_vkGetPipelineCacheData>("vkGetPipelineCacheData");
     std::size_t size = 0;
-    if (getData(context.device, cache, &size, nullptr) != VK_SUCCESS || size == 0 || size == savedBytes) return;
+    if (getData(context.device, cache, &size, nullptr) != VK_SUCCESS || size == 0) return;
     std::vector<std::byte> file(sizeof(FileHeader) + size);
     const auto result = getData(context.device, cache, &size, file.data() + sizeof(FileHeader));
-    if (result != VK_SUCCESS && result != VK_INCOMPLETE) return;
+    if (result != VK_SUCCESS) return;
     file.resize(sizeof(FileHeader) + size);
-    const FileHeader header{FileMagic, FileFormat, size, ShaderRecompiler::HashBytes(std::span(file).subspan(sizeof(FileHeader)))};
+    const auto hash = ShaderRecompiler::HashBytes(std::span(file).subspan(sizeof(FileHeader)));
+    if (size == savedBytes && hash == savedHash) return;
+    const FileHeader header{FileMagic, FileFormat, size, hash};
     std::memcpy(file.data(), &header, sizeof(header));
     const auto started = std::chrono::steady_clock::now();
     if (!ShaderRecompiler::WriteFileAtomically(path, file)) {
@@ -120,6 +123,7 @@ void PipelineCache::save(bool final) {
         return;
     }
     savedBytes = size;
+    savedHash = hash;
     if (final || profiling()) aps5::LogErr( "[pipeline-cache] saved %.1f KiB to %s in %.1f ms%s\n", static_cast<double>(size) / 1024.0, path.string().c_str(), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count(), final ? " (teardown)" : "");
 }
 
