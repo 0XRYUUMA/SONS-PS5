@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp"
+#include "prx/libSceAgcDriver/Execution/include/FrameDiagnostics.hpp"
 #include "prx/common/StderrLog.hpp"
 #include "BdaAbi.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
@@ -1682,6 +1683,9 @@ FrameDumps& Dumps() {
 }
 
 bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
+    const auto diagnosticFrame = Diagnostics::Enabled() ? Diagnostics::NextFrame() : 0;
+    const auto diagnosticStart = Diagnostics::Enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    (void)diagnosticFrame;
     if (buffer.tilingMode == 1) {
         const auto pixels = ReadDisplayBuffer(buffer);
         return present(buffer.width, buffer.height, true, pixels);
@@ -1765,10 +1769,16 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
         aps5::LogErr( "[flip] %llu presents from the resident image (%llu as texel copies, %llu refreshed first), through guest memory: %llu not pending, %llu unsuitable (extent %llu, mips/layers %llu, bytes %llu, format %llu, byte-order %llu, unattached %llu, blit-src %llu); %llu GPU frame dumps\n", static_cast<unsigned long long>(residentPresents), static_cast<unsigned long long>(residentCopies), static_cast<unsigned long long>(refreshedPresents), static_cast<unsigned long long>(notPending), static_cast<unsigned long long>(unsuitable), static_cast<unsigned long long>(unsuitableExtent), static_cast<unsigned long long>(unsuitableMips), static_cast<unsigned long long>(unsuitableBytes), static_cast<unsigned long long>(unsuitableFormat), static_cast<unsigned long long>(unsuitableByteOrder), static_cast<unsigned long long>(unsuitableUnattached), static_cast<unsigned long long>(unsuitableBlit), static_cast<unsigned long long>(gpuDumps));
     }
     CaptureTrace::Log("present dump=%d address=%llx width=%u height=%u resident=%d copy=%d generation=%llu", dumpFrame ? state->nextDumpIndex : -1, static_cast<unsigned long long>(buffer.address), buffer.width, buffer.height, resident != nullptr, residentCopy, static_cast<unsigned long long>(resident ? resident->Generation() : 0));
+    if (Diagnostics::Enabled() && resident == nullptr && pending) Diagnostics::Report("display", reason ? reason : "resident_unavailable");
     if (!present(buffer.width, buffer.height, true, {}, &buffer, resident, filter, dumpFrame, residentCopy)) {
+        Diagnostics::Report("present", "skipped");
 
         if (dumpFrame) --dumps.dumped;
         return false;
+    }
+    if (Diagnostics::Enabled()) {
+        const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - diagnosticStart).count();
+        if (elapsed >= 40.0) Diagnostics::Report("present", "slow_frame", elapsed);
     }
     return true;
 }
@@ -1787,9 +1797,11 @@ bool VulkanDevice::AcquireImage() {
 
     const auto acquired = state->DeviceFunction<PFN_vkAcquireNextImageKHR>("vkAcquireNextImageKHR")(state->device, state->swapchain, 5'000'000'000ULL, VK_NULL_HANDLE, state->acquireFence, &index);
     if (acquired == VK_ERROR_OUT_OF_DATE_KHR) {
+        Diagnostics::Report("swapchain", "acquire_out_of_date");
         state->extent = {0, 0};
         return false;
     }
+    if (acquired == VK_SUBOPTIMAL_KHR) Diagnostics::Report("swapchain", "acquire_suboptimal");
     if (acquired != VK_SUBOPTIMAL_KHR) check(acquired, "vkAcquireNextImageKHR");
     timing.Mark("acquire_image");
     APS5_LOG_OUT_DEBUG("vkAcquireNextImageKHR index=%u imageCount=%zu", index, state->images.size());
@@ -2091,6 +2103,8 @@ void VulkanDevice::QueuePresent() {
     present.pSwapchains = &state->swapchain;
     present.pImageIndices = &index;
     const auto presented = state->DeviceFunction<PFN_vkQueuePresentKHR>("vkQueuePresentKHR")(state->queue, &present);
+    if (presented == VK_ERROR_OUT_OF_DATE_KHR) Diagnostics::Report("swapchain", "present_out_of_date");
+    if (presented == VK_SUBOPTIMAL_KHR) Diagnostics::Report("swapchain", "present_suboptimal");
     if (presented == VK_ERROR_OUT_OF_DATE_KHR || presented == VK_SUBOPTIMAL_KHR) state->extent = {0, 0};
     else check(presented, "vkQueuePresentKHR");
     timing.Mark("queue_present");
