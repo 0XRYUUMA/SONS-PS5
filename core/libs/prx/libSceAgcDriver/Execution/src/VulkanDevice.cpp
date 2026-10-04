@@ -1708,6 +1708,7 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
             ++notPending;
         } else if (resident == nullptr) {
             ++unsuitable;
+            Diagnostics::Report("display", reason ? reason : "resident_unavailable");
             if (reason == std::string_view("extent")) ++unsuitableExtent;
             else if (reason == std::string_view("mips/layers")) ++unsuitableMips;
             else if (reason == std::string_view("bytes")) ++unsuitableBytes;
@@ -1769,7 +1770,6 @@ bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
         aps5::LogErr( "[flip] %llu presents from the resident image (%llu as texel copies, %llu refreshed first), through guest memory: %llu not pending, %llu unsuitable (extent %llu, mips/layers %llu, bytes %llu, format %llu, byte-order %llu, unattached %llu, blit-src %llu); %llu GPU frame dumps\n", static_cast<unsigned long long>(residentPresents), static_cast<unsigned long long>(residentCopies), static_cast<unsigned long long>(refreshedPresents), static_cast<unsigned long long>(notPending), static_cast<unsigned long long>(unsuitable), static_cast<unsigned long long>(unsuitableExtent), static_cast<unsigned long long>(unsuitableMips), static_cast<unsigned long long>(unsuitableBytes), static_cast<unsigned long long>(unsuitableFormat), static_cast<unsigned long long>(unsuitableByteOrder), static_cast<unsigned long long>(unsuitableUnattached), static_cast<unsigned long long>(unsuitableBlit), static_cast<unsigned long long>(gpuDumps));
     }
     CaptureTrace::Log("present dump=%d address=%llx width=%u height=%u resident=%d copy=%d generation=%llu", dumpFrame ? state->nextDumpIndex : -1, static_cast<unsigned long long>(buffer.address), buffer.width, buffer.height, resident != nullptr, residentCopy, static_cast<unsigned long long>(resident ? resident->Generation() : 0));
-    if (Diagnostics::Enabled() && resident == nullptr && pending) Diagnostics::Report("display", reason ? reason : "resident_unavailable");
     if (!present(buffer.width, buffer.height, true, {}, &buffer, resident, filter, dumpFrame, residentCopy)) {
         Diagnostics::Report("present", "skipped");
 
