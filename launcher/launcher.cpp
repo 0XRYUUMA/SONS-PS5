@@ -504,14 +504,98 @@ struct Splash {
 };
 
 struct Launcher {
+    static constexpr UINT kGetDpiScaledSize = 0x02E4;  // WM_GETDPISCALEDSIZE (Windows 10 1703+), not declared for the default WINVER
+    // The layout stops growing at 175%; the window stays DPI aware, so above that it keeps its 175% size and text is still drawn sharply.
+    static constexpr UINT kMaxLayoutDpi = 168;
+    // Client area at 100%. It and every control are scaled from these 96-DPI values, never from the current size, so moving between
+    // monitors cannot add up rounding errors.
+    static constexpr int kWidth = 440, kHeight = 324;
+    struct Placed { HWND control; RECT bounds; HFONT* face; };
     HWND window = nullptr;
     HWND mode = nullptr;
     HWND resolution = nullptr;
+    HFONT font = nullptr, heading = nullptr;
+    std::vector<Placed> placed;
     int chosen = -1;
     bool borderless = false;
     bool play = false;
+    template <typename Function> static Function User32(const char* name) {
+        return reinterpret_cast<Function>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"user32.dll"), name)));
+    }
+    static UINT Dpi(HWND hwnd) {
+        static const auto forWindow = User32<UINT(WINAPI*)(HWND)>("GetDpiForWindow");
+        UINT dpi = forWindow != nullptr ? forWindow(hwnd) : 0;
+        if (dpi == 0) {
+            HDC screen = GetDC(nullptr);
+            dpi = static_cast<UINT>(GetDeviceCaps(screen, LOGPIXELSY));
+            ReleaseDC(nullptr, screen);
+        }
+        return dpi != 0 ? dpi : USER_DEFAULT_SCREEN_DPI;
+    }
+    static int LayoutDpi(UINT dpi) { return static_cast<int>(min(dpi, kMaxLayoutDpi)); }
+    // Grows a client rectangle to the window rectangle; the caption and borders follow the real DPI.
+    void Frame(RECT* rect, UINT dpi) const {
+        const DWORD style = static_cast<DWORD>(GetWindowLongW(window, GWL_STYLE)), exStyle = static_cast<DWORD>(GetWindowLongW(window, GWL_EXSTYLE));
+        static const auto adjust = User32<BOOL(WINAPI*)(RECT*, DWORD, BOOL, DWORD, UINT)>("AdjustWindowRectExForDpi");
+        if (adjust == nullptr || !adjust(rect, style, FALSE, exStyle, dpi)) AdjustWindowRectEx(rect, style, FALSE, exStyle);
+    }
+    // Because of the cap the size is not proportional to the DPI, so Windows is told the size the window will get on the new monitor.
+    SIZE ScaledSize(UINT dpi) const {
+        RECT frame{0, 0, MulDiv(kWidth, LayoutDpi(dpi), USER_DEFAULT_SCREEN_DPI), MulDiv(kHeight, LayoutDpi(dpi), USER_DEFAULT_SCREEN_DPI)};
+        Frame(&frame, dpi);
+        return SIZE{frame.right - frame.left, frame.bottom - frame.top};
+    }
+    // Fonts, controls and the client area use the capped layout DPI; edges are scaled rather than sizes, so edges that line up at 100% still do.
+    void Layout(UINT dpi, const RECT* suggested) {
+        auto scale = [layoutDpi = LayoutDpi(dpi)](int value) { return MulDiv(value, layoutDpi, USER_DEFAULT_SCREEN_DPI); };
+        // Font sizes are rounded down, so text never grows faster than the boxes it is placed in.
+        auto fontHeight = [layoutDpi = LayoutDpi(dpi)](int pixels) { return -(pixels * layoutDpi / USER_DEFAULT_SCREEN_DPI); };
+        HFONT oldFont = font, oldHeading = heading;
+        font = CreateFontW(fontHeight(16), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        heading = CreateFontW(fontHeight(24), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        for (const auto& item : placed) {
+            SendMessageW(item.control, WM_SETFONT, reinterpret_cast<WPARAM>(*item.face), FALSE);
+            const RECT& b = item.bounds;
+            MoveWindow(item.control, scale(b.left), scale(b.top), scale(b.right) - scale(b.left), scale(b.bottom) - scale(b.top), FALSE);
+        }
+        if (oldFont != nullptr) DeleteObject(oldFont);
+        if (oldHeading != nullptr) DeleteObject(oldHeading);
+        const SIZE size = ScaledSize(dpi);
+        const int clientWidth = scale(kWidth), clientHeight = scale(kHeight);
+        WINDOWPLACEMENT placement{};
+        placement.length = sizeof(placement);
+        if (IsIconic(window) && GetWindowPlacement(window, &placement)) {
+            // A minimized window keeps its place and only gets the size it is restored to.
+            placement.rcNormalPosition.right = placement.rcNormalPosition.left + size.cx;
+            placement.rcNormalPosition.bottom = placement.rcNormalPosition.top + size.cy;
+            SetWindowPlacement(window, &placement);
+        } else {
+            // After a DPI change Windows suggests the place; at first the window is centered in the work area of its monitor.
+            MONITORINFO monitor{};
+            monitor.cbSize = sizeof(monitor);
+            GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY), &monitor);
+            const RECT work = monitor.rcWork;
+            const int x = suggested != nullptr ? suggested->left : work.left + max(0L, work.right - work.left - size.cx) / 2;
+            const int y = suggested != nullptr ? suggested->top : work.top + max(0L, work.bottom - work.top - size.cy) / 2;
+            SetWindowPos(window, nullptr, x, y, size.cx, size.cy, SWP_NOZORDER | SWP_NOACTIVATE);
+            // If the frame the system draws differs from the computed one, correct the size once so the client area fits the layout exactly.
+            RECT client{};
+            GetClientRect(window, &client);
+            if (client.right != clientWidth || client.bottom != clientHeight)
+                SetWindowPos(window, nullptr, 0, 0, size.cx + clientWidth - client.right, size.cy + clientHeight - client.bottom, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
+        }
+        RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    }
     static LRESULT CALLBACK Proc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
         auto* self = reinterpret_cast<Launcher*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (message == kGetDpiScaledSize && self != nullptr) {
+            *reinterpret_cast<SIZE*>(lParam) = self->ScaledSize(static_cast<UINT>(wParam));
+            return TRUE;
+        }
+        if (message == WM_DPICHANGED) {
+            if (self != nullptr) self->Layout(HIWORD(wParam), reinterpret_cast<const RECT*>(lParam));
+            return 0;
+        }
         if (message == WM_COMMAND && self != nullptr && (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)) {
             self->play = LOWORD(wParam) == IDOK;
             self->borderless = SendMessageW(self->mode, CB_GETCURSEL, 0, 0) == 1;
@@ -529,6 +613,14 @@ struct Launcher {
     // Shows the settings and saves them when Play is pressed; false means the player closed the launcher instead.
     bool Run(const std::wstring& directory, HICON icon) {
         borderless = ReadBorderless(directory);
+        // Only while the launcher window exists is this thread per-monitor DPI aware, so the window is drawn sharply at the real scaling;
+        // this runs on the main thread, so its previous DPI mode is restored afterwards. Windows before 10 1607 lack the API and keep
+        // scaling the window as a bitmap, as before.
+        const auto aware = User32<DPI_AWARENESS_CONTEXT(WINAPI*)(DPI_AWARENESS_CONTEXT)>("SetThreadDpiAwarenessContext");
+        DPI_AWARENESS_CONTEXT previous = nullptr;
+        if (aware != nullptr) {
+            if ((previous = aware(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) == nullptr) previous = aware(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+        }
         INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES};
         InitCommonControlsEx(&controls);
         WNDCLASSW windowClass{};
@@ -539,21 +631,24 @@ struct Launcher {
         windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
         RegisterClassW(&windowClass);
         const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-        RECT bounds{0, 0, 440, 324};
-        AdjustWindowRectEx(&bounds, style, FALSE, 0);
-        const int width = bounds.right - bounds.left, height = bounds.bottom - bounds.top;
-        window = CreateWindowExW(0, windowClass.lpszClassName, LAUNCHER_TITLE, style, (GetSystemMetrics(SM_CXSCREEN) - width) / 2, (GetSystemMetrics(SM_CYSCREEN) - height) / 2, width, height, nullptr, nullptr, windowClass.hInstance, nullptr);
-        if (window == nullptr) return true;
+        // Created hidden on the primary monitor so its DPI is known before the final size and position are chosen.
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(monitor);
+        GetMonitorInfoW(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), &monitor);
+        window = CreateWindowExW(0, windowClass.lpszClassName, LAUNCHER_TITLE, style, monitor.rcWork.left, monitor.rcWork.top, 0, 0, nullptr, nullptr, windowClass.hInstance, nullptr);
+        if (window == nullptr) {
+            if (previous != nullptr) aware(previous);
+            return true;
+        }
         SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
         if (icon != nullptr) {
             SendMessageW(window, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon));
             SendMessageW(window, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(icon));
         }
-        HFONT font = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-        HFONT heading = CreateFontW(-24, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-        auto control = [&](const wchar_t* type, const wchar_t* text, DWORD flags, int x, int y, int w, int h, int id, HFONT face) {
+        // Positions and sizes are the 100% layout; Layout scales them and sets the fonts.
+        auto control = [&](const wchar_t* type, const wchar_t* text, DWORD flags, int x, int y, int w, int h, int id, HFONT& face) {
             HWND handle = CreateWindowExW(0, type, text, WS_CHILD | WS_VISIBLE | flags, x, y, w, h, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), windowClass.hInstance, nullptr);
-            SendMessageW(handle, WM_SETFONT, reinterpret_cast<WPARAM>(face), TRUE);
+            placed.push_back(Placed{handle, RECT{x, y, x + w, y + h}, &face});
             return handle;
         };
         control(L"STATIC", L"God of War: Sons of Sparta", 0, 24, 16, 392, 34, 0, heading);
@@ -562,8 +657,9 @@ struct Launcher {
         mode = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 152, 92, 244, 200, 101, font);
         control(L"STATIC", L"Resolution", SS_CENTERIMAGE, 44, 130, 104, 28, 0, font);
         resolution = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 152, 130, 244, 200, 100, font);
-        control(L"STATIC", L"Lower resolutions improve GPU performance.", 0, 44, 176, 352, 22, 0, font);
-        control(L"STATIC", L"F11 switches between Windowed and Borderless Fullscreen while the game is running.", 0, 44, 208, 352, 44, 0, font);
+        // The help text is drawn from the top of its box; the boxes are a little taller than the text at 100% so it is not clipped at other scales.
+        control(L"STATIC", L"Lower resolutions improve GPU performance.", 0, 44, 176, 352, 24, 0, font);
+        control(L"STATIC", L"F11 switches between Windowed and Borderless Fullscreen while the game is running.", 0, 44, 208, 352, 48, 0, font);
         HWND playButton = control(L"BUTTON", L"Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 222, 276, 92, 30, IDOK, font);
         control(L"BUTTON", L"Exit", BS_PUSHBUTTON | WS_TABSTOP, 324, 276, 92, 30, IDCANCEL, font);
 
@@ -585,6 +681,7 @@ struct Launcher {
         }
         SendMessageW(resolution, CB_SETCURSEL, selected, 0);
 
+        Layout(Dpi(window), nullptr);
         ShowWindow(window, SW_SHOWNORMAL);
         SetForegroundWindow(window);
         SetFocus(playButton);
@@ -594,6 +691,7 @@ struct Launcher {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+        if (previous != nullptr) aware(previous);
         DeleteObject(font);
         DeleteObject(heading);
         if (play && chosen >= 0) {
