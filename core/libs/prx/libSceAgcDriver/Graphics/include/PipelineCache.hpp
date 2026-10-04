@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <mutex>
 #include <thread>
@@ -32,6 +33,7 @@ private:
     VkPipelineCache cache = VK_NULL_HANDLE;
     std::filesystem::path path;
     std::size_t savedBytes = 0;
+    std::uint64_t savedHash = 0;
     std::mutex mutex;
     std::condition_variable wake;
     bool stopping = false;
