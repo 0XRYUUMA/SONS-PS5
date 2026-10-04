@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/FrameDiagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 
