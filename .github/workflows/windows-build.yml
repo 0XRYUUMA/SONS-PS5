@@ -24,6 +24,12 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\winlibs.zip"
           Expand-Archive -Path "$env:RUNNER_TEMP\winlibs.zip" -DestinationPath "$env:RUNNER_TEMP\winlibs"
           "$env:RUNNER_TEMP\winlibs\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Download FFmpeg prebuilt package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "build/externals" | Out-Null
+          $url = "https://github.com/KytyPS5/ext-ffmpeg-core/releases/download/9ac4cfd195f1/ffmpeg-mingw-x64.zip"
+          Invoke-WebRequest -Uri $url -OutFile "build/externals/9ac4cfd195f1-ffmpeg-mingw-x64.zip"
       - name: Configure
         run: |
           g++ --version
