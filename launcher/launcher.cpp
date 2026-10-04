@@ -37,59 +37,120 @@ bool Exists(const std::wstring& path) { return GetFileAttributesW(path.c_str()) 
 const unsigned char kSettingsHeader[12] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x00, 0x00};
 const char kSettingsBody[] = R"json(ersion":"0.1","globalSaveDataV1ref":{"previouslyBootedGame":true,"previouslySavedDifficultyLevel":0,"previouslyInitializedToDefaults":true,"vsyncOn":false,"isPitUnlocked":false,"previouslySelectedSaveSlotIndex":-1,"masterAudioVolume":0.0,"sfxAudioVolume":0.0,"bgmAudioVolume":0.0,"keybindingsOverride":"","pitData":"","hasBeatenGame":false,"aimAssist":0,"enablePuzzleAimAssist":false,"puzzleTiming":0,"hintsEnabled":true,"hintWaitDuration":1,"disableTutorial":true,"GuidedExperience":true,"GameDifficulty":1,"viewControls":false,"AutoPickupEnabled":false,"menuHolds":0,"repeatedButtonPress":0,"traversalInputs":0,"cinematicSkip":false,"touchpadButton":3,"swipeUp":0,"swipeLeft":0,"swipeRight":0,"swipeDown":0,"controllerVisualization":false,"visualizationContrast":0,"hudCustomization":0,"combatHUD":1,"aimReticle":1,"bossHealthBars":1,"enemyHealthBars":1,"gameplayNotificationToggle":1,"volumeBalance":0,"outputDevice":0,"monoAudioSystemIntegratedSupport":false,"globalVolume":10.0,"dialogueVolume":10.0,"musicVolume":10.0,"sfxVolume":10.0,"controllerSpeakerVolume":10.0,"enableSubtitles":true,"subtitleTextColor":0,"displaySpeakerName":true,"speakerTextColor":0,"enableCaptions":false,"captionTextColor":0,"subtitleAndCaptionTextSize":0,"blurSubtitleAndCaptionBackground":false,"subtitleAndCaptionBackground":1,"audioCue":false,"audioCueVolume":10.0,"audioPanning":0.0,"centerPanDialogue":false,"voiceBoost":false,"uiTextSize":0,"iconSize":0,"highContrastHUD":0,"colorFilter":0,"filterStrength":10.0,"highContrastDisplay":0,"HeroColor":0,"CompanionColor":0,"BossColor":0,"EnemyColor":0,"NPCColor":0,"TargetColor":0,"InteractColor":0,"HazardColor":0,"traversalColor":0,"backgroundColor":0,"enableVsync":true,"screenCalibration":false,"filterMode":0,"enableBloodAndGore":0,"enableBrutalKillPrompt":true,"enableBloodVFX":true,"enableCorpseBloodVFX":true,"fullScreenMode":0,"resolutionIndex":0,"aspectRatio":0,"cameraPanningSpeed":10,"cameraShakeIntensity":10,"activationToggle":false,"horizontalSpeed":0,"verticalSpeed":0,"accelerationSpeed":0,"reduceSmallMotions":0,"textLanguage":0,"speechLanguage":0,"controllerVibration":2,"enableAimToggling":false,"enableBlockToggling":false,"enableHDR":true,"gammaValue":50.5,"brightnessValue":50.5,"personalRecordSpeedrunDataBoy":{"isValid":false,"overallTime":0.0},"chapterBestSpeedrunDataBoy":{"isValid":false,"overallTime":0.0},"personalRecordSpeedrunDataCadet":{"isValid":false,"overallTime":0.0},"chapterBestSpeedrunDataCadet":{"isValid":false,"overallTime":0.0},"personalRecordSpeedrunDataSpartan":{"isValid":false,"overallTime":0.0},"chapterBestSpeedrunDataSpartan":{"isValid":false,"overallTime":0.0},"version":2}})json";
 
-bool SeedSettings(const std::wstring& directory) {
-    CreateDirectoryW((directory + L"\\_sd").c_str(), nullptr);
-    CreateDirectoryW((directory + L"\\_sd\\GOWSOSSAVE999").c_str(), nullptr);
-    FILE* file = nullptr;
-    if (_wfopen_s(&file, (directory + L"\\_sd\\GOWSOSSAVE999\\GoW_SoS999.dat").c_str(), L"wb") != 0 || file == nullptr) return false;
-    fwrite(kSettingsHeader, 1, sizeof(kSettingsHeader), file);
-    for (size_t i = 0; kSettingsBody[i] != 0; ++i) {
-        const unsigned char unit[4] = {static_cast<unsigned char>(kSettingsBody[i]), 0, 0, 0};
-        fwrite(unit, 1, 4, file);
-    }
-    fclose(file);
-    return true;
+const wchar_t* kSettingsFile = L"\\_sd\\GOWSOSSAVE999\\GoW_SoS999.dat";
+const char kResolutionKey[] = "resolutionIndex";
+
+// resolutionIndex picks from the list the game builds at run time from the PS5 display manager: the 16:9 sizes
+// 1920 to 3200 wide in steps of 320, then to 3840 in steps of 160, sorted from the widest. Only the common ones are offered.
+struct Resolution { int index; const wchar_t* label; };
+const Resolution kResolutions[] = {{0, L"3840 x 2160 (4K)"}, {6, L"2560 x 1440 (2K / QHD)"}, {8, L"1920 x 1080 (Full HD)"}};
+
+// Host settings that do not belong in the game's save, read with the Windows profile API from launcher.ini.
+const wchar_t* kLauncherIni = L"\\launcher.ini";
+
+bool ReadBorderless(const std::wstring& directory) {
+    wchar_t mode[32] = {};
+    GetPrivateProfileStringW(L"Display", L"Mode", L"Windowed", mode, 32, (directory + kLauncherIni).c_str());
+    return _wcsicmp(mode, L"Borderless") == 0;
 }
 
-void ApplyResolution(const std::wstring& directory) {
+// The settings file is kSettingsHeader followed by JSON text with every character stored as four bytes.
+std::vector<unsigned char> SeedSettings() {
+    std::vector<unsigned char> data(kSettingsHeader, kSettingsHeader + sizeof(kSettingsHeader));
+    for (size_t i = 0; kSettingsBody[i] != 0; ++i) {
+        data.push_back(static_cast<unsigned char>(kSettingsBody[i]));
+        data.insert(data.end(), 3, 0);
+    }
+    return data;
+}
+
+// Before the game has saved its settings once, the seeded defaults stand in for the file.
+bool LoadSettings(const std::wstring& directory, std::vector<unsigned char>& data) {
+    const std::wstring path = directory + kSettingsFile;
+    if (!Exists(path)) {
+        data = SeedSettings();
+        return true;
+    }
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"rb") != 0 || file == nullptr) return false;
+    data.clear();
+    unsigned char buffer[4096];
+    size_t count;
+    while ((count = fread(buffer, 1, sizeof(buffer), file)) > 0) data.insert(data.end(), buffer, buffer + count);
+    const bool ok = ferror(file) == 0;
+    fclose(file);
+    return ok;
+}
+
+bool StoreSettings(const std::wstring& directory, const std::vector<unsigned char>& data) {
+    CreateDirectoryW((directory + L"\\_sd").c_str(), nullptr);
+    CreateDirectoryW((directory + L"\\_sd\\GOWSOSSAVE999").c_str(), nullptr);
+    const std::wstring path = directory + kSettingsFile, temporary = path + L".tmp";
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, temporary.c_str(), L"wb") != 0 || file == nullptr) return false;
+    const bool written = fwrite(data.data(), 1, data.size(), file) == data.size();
+    if (fclose(file) == 0 && written && MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
+    DeleteFileW(temporary.c_str());
+    return false;
+}
+
+// Offset of the unsigned integer stored under a key that must occur exactly once, or npos.
+size_t FindInteger(const std::vector<unsigned char>& data, const char* key, size_t& digits, int& value) {
+    const std::string text = std::string("\"") + key + "\":";
+    std::vector<unsigned char> pattern;
+    for (const char character : text) {
+        pattern.push_back(static_cast<unsigned char>(character));
+        pattern.insert(pattern.end(), 3, 0);
+    }
+    const auto found = std::search(data.begin(), data.end(), pattern.begin(), pattern.end());
+    if (found == data.end() || (found - data.begin()) % 4 != 0 || std::search(found + 1, data.end(), pattern.begin(), pattern.end()) != data.end()) return std::string::npos;
+    const size_t at = static_cast<size_t>(found - data.begin()) + pattern.size();
+    auto unit = [&](size_t index) {
+        const size_t offset = at + index * 4;
+        return offset + 4 <= data.size() && data[offset + 1] == 0 && data[offset + 2] == 0 && data[offset + 3] == 0 ? data[offset] : 0;
+    };
+    value = 0;
+    for (digits = 0; digits < 9 && unit(digits) >= '0' && unit(digits) <= '9'; ++digits) value = value * 10 + (unit(digits) - '0');
+    return digits != 0 && (unit(digits) == ',' || unit(digits) == '}') ? at : std::string::npos;
+}
+
+int ReadIntSetting(const std::wstring& directory, const char* key) {
+    std::vector<unsigned char> data;
+    size_t digits = 0;
+    int value = -1;
+    return LoadSettings(directory, data) && FindInteger(data, key, digits, value) != std::string::npos ? value : -1;
+}
+
+// Rewrites only the digits of one value, in place and with the same length, so the rest of the file stays byte for byte
+// the same. Nothing is written when the value is already set, so a missing file is seeded only when something changes.
+bool WriteIntSetting(const std::wstring& directory, const char* key, int value) {
+    std::vector<unsigned char> data;
+    size_t digits = 0;
+    int current = -1;
+    if (!LoadSettings(directory, data)) return false;
+    const size_t at = FindInteger(data, key, digits, current);
+    if (at == std::string::npos) return false;
+    if (current == value) return true;
+    const std::string text = std::to_string(value);
+    if (value < 0 || text.size() != digits) return false;
+    for (size_t i = 0; i < digits; ++i) data[at + i * 4] = static_cast<unsigned char>(text[i]);
+    return StoreSettings(directory, data);
+}
+
+// resolution.txt was the earlier way to choose the resolution. Its value only preselects the launcher's choice; the
+// file is renamed once Play has saved a choice, so that it cannot override the launcher on later starts.
+int ReadResolutionFile(const std::wstring& directory) {
     FILE* choice = nullptr;
-    if (_wfopen_s(&choice, (directory + L"\\resolution.txt").c_str(), L"r") != 0 || choice == nullptr) return;
+    if (_wfopen_s(&choice, (directory + L"\\resolution.txt").c_str(), L"r") != 0 || choice == nullptr) return -1;
     char word[32] = {};
     fgets(word, sizeof(word), choice);
     fclose(choice);
     std::string value = word;
     for (auto& character : value) character = static_cast<char>(tolower(static_cast<unsigned char>(character)));
-    char wanted = 0;
-    if (value.rfind("1080", 0) == 0) wanted = '8';
-    else if (value.rfind("1440", 0) == 0) wanted = '6';
-    else if (value.rfind("4k", 0) == 0 || value.rfind("2160", 0) == 0) wanted = '0';
-    if (wanted == 0) return;
-    const std::wstring path = directory + L"\\_sd\\GOWSOSSAVE999\\GoW_SoS999.dat";
-    FILE* file = nullptr;
-    if (!Exists(path) && !SeedSettings(directory)) return;
-    if (_wfopen_s(&file, path.c_str(), L"rb") != 0 || file == nullptr) return;
-    std::vector<unsigned char> data;
-    unsigned char buffer[4096];
-    size_t count;
-    while ((count = fread(buffer, 1, sizeof(buffer), file)) > 0) data.insert(data.end(), buffer, buffer + count);
-    fclose(file);
-    const char key[] = "\"resolutionIndex\":";
-    std::vector<unsigned char> pattern;
-    for (size_t i = 0; key[i] != 0; ++i) {
-        pattern.push_back(static_cast<unsigned char>(key[i]));
-        pattern.insert(pattern.end(), 3, 0);
-    }
-    const auto found = std::search(data.begin(), data.end(), pattern.begin(), pattern.end());
-    if (found == data.end()) return;
-    const size_t at = static_cast<size_t>(found - data.begin()) + pattern.size();
-    if (at + 8 > data.size()) return;
-    const bool digit = data[at] >= '0' && data[at] <= '9' && data[at + 1] == 0 && data[at + 2] == 0 && data[at + 3] == 0;
-    const bool longer = data[at + 4] >= '0' && data[at + 4] <= '9' && data[at + 5] == 0;
-    if (!digit || longer || data[at] == static_cast<unsigned char>(wanted)) return;
-    data[at] = static_cast<unsigned char>(wanted);
-    if (_wfopen_s(&file, path.c_str(), L"wb") != 0 || file == nullptr) return;
-    fwrite(data.data(), 1, data.size(), file);
-    fclose(file);
+    if (value.rfind("1080", 0) == 0) return 8;
+    if (value.rfind("1440", 0) == 0) return 6;
+    if (value.rfind("4k", 0) == 0 || value.rfind("2160", 0) == 0) return 0;
+    return -1;
 }
 
 bool IsDirectory(const std::wstring& path) {
@@ -338,6 +399,26 @@ BOOL CALLBACK FindGameWindow(HWND window, LPARAM parameter) {
     return TRUE;
 }
 
+// Borderless fullscreen is AnyPS5's own F11 toggle. Once the SDL game window is the active window and presents frames
+// (its title shows the FPS counter), one F11 press and release is posted to it. SDL turns them into its normal key
+// events, so its fullscreen state stays consistent and F11 keeps working both ways. If the game window does not become
+// the active window, nothing is sent, so keys are never sent to another window.
+void RequestFullscreen(const PROCESS_INFORMATION& process) {
+    for (int i = 0; i < 240 && WaitForSingleObject(process.hProcess, 250) == WAIT_TIMEOUT; ++i) {
+        HWND window = GetForegroundWindow();
+        DWORD owner = 0;
+        wchar_t name[16] = {};
+        wchar_t title[256] = {};
+        GetWindowThreadProcessId(window, &owner);
+        if (owner != process.dwProcessId || GetClassNameW(window, name, 16) == 0 || wcscmp(name, L"SDL_app") != 0) continue;
+        if (GetWindowTextW(window, title, 256) == 0 || wcsstr(title, L" | FPS: ") == nullptr) continue;
+        const LPARAM scan = static_cast<LPARAM>(MapVirtualKeyW(VK_F11, MAPVK_VK_TO_VSC)) << 16;
+        PostMessageW(window, WM_KEYDOWN, VK_F11, scan | 1);
+        PostMessageW(window, WM_KEYUP, VK_F11, scan | 1 | 0xC0000000);
+        return;
+    }
+}
+
 bool ConvertOrCopy(const std::wstring& from, const std::wstring& to) {
     if (IsElf(from)) return CopyFileW(from.c_str(), to.c_str(), FALSE) != 0;
     return ExtractSelf(from, to);
@@ -579,6 +660,212 @@ struct Splash {
     ~Splash() { Close(); }
 };
 
+struct Launcher {
+    static constexpr UINT kGetDpiScaledSize = 0x02E4;  // WM_GETDPISCALEDSIZE (Windows 10 1703+), not declared for the default WINVER
+    // The layout stops growing at 175%; the window stays DPI aware, so above that it keeps its 175% size and text is still drawn sharply.
+    static constexpr UINT kMaxLayoutDpi = 168;
+    // Client area at 100%. It and every control are scaled from these 96-DPI values, never from the current size, so moving between
+    // monitors cannot add up rounding errors.
+    static constexpr int kWidth = 440, kHeight = 324;
+    struct Placed { HWND control; RECT bounds; HFONT* face; };
+    HWND window = nullptr;
+    HWND mode = nullptr;
+    HWND resolution = nullptr;
+    HFONT font = nullptr, heading = nullptr;
+    std::vector<Placed> placed;
+    int chosen = -1;
+    bool borderless = false;
+    bool play = false;
+    template <typename Function> static Function User32(const char* name) {
+        return reinterpret_cast<Function>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"user32.dll"), name)));
+    }
+    static UINT Dpi(HWND hwnd) {
+        static const auto forWindow = User32<UINT(WINAPI*)(HWND)>("GetDpiForWindow");
+        UINT dpi = forWindow != nullptr ? forWindow(hwnd) : 0;
+        if (dpi == 0) {
+            HDC screen = GetDC(nullptr);
+            dpi = static_cast<UINT>(GetDeviceCaps(screen, LOGPIXELSY));
+            ReleaseDC(nullptr, screen);
+        }
+        return dpi != 0 ? dpi : USER_DEFAULT_SCREEN_DPI;
+    }
+    static int LayoutDpi(UINT dpi) { return static_cast<int>(min(dpi, kMaxLayoutDpi)); }
+    // Grows a client rectangle to the window rectangle; the caption and borders follow the real DPI.
+    void Frame(RECT* rect, UINT dpi) const {
+        const DWORD style = static_cast<DWORD>(GetWindowLongW(window, GWL_STYLE)), exStyle = static_cast<DWORD>(GetWindowLongW(window, GWL_EXSTYLE));
+        static const auto adjust = User32<BOOL(WINAPI*)(RECT*, DWORD, BOOL, DWORD, UINT)>("AdjustWindowRectExForDpi");
+        if (adjust == nullptr || !adjust(rect, style, FALSE, exStyle, dpi)) AdjustWindowRectEx(rect, style, FALSE, exStyle);
+    }
+    // Because of the cap the size is not proportional to the DPI, so Windows is told the size the window will get on the new monitor.
+    SIZE ScaledSize(UINT dpi) const {
+        RECT frame{0, 0, MulDiv(kWidth, LayoutDpi(dpi), USER_DEFAULT_SCREEN_DPI), MulDiv(kHeight, LayoutDpi(dpi), USER_DEFAULT_SCREEN_DPI)};
+        Frame(&frame, dpi);
+        return SIZE{frame.right - frame.left, frame.bottom - frame.top};
+    }
+    // Fonts, controls and the client area use the capped layout DPI; edges are scaled rather than sizes, so edges that line up at 100% still do.
+    void Layout(UINT dpi, const RECT* suggested) {
+        auto scale = [layoutDpi = LayoutDpi(dpi)](int value) { return MulDiv(value, layoutDpi, USER_DEFAULT_SCREEN_DPI); };
+        // Font sizes are rounded down, so text never grows faster than the boxes it is placed in.
+        auto fontHeight = [layoutDpi = LayoutDpi(dpi)](int pixels) { return -(pixels * layoutDpi / USER_DEFAULT_SCREEN_DPI); };
+        HFONT oldFont = font, oldHeading = heading;
+        font = CreateFontW(fontHeight(16), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        heading = CreateFontW(fontHeight(24), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        for (const auto& item : placed) {
+            SendMessageW(item.control, WM_SETFONT, reinterpret_cast<WPARAM>(*item.face), FALSE);
+            const RECT& b = item.bounds;
+            MoveWindow(item.control, scale(b.left), scale(b.top), scale(b.right) - scale(b.left), scale(b.bottom) - scale(b.top), FALSE);
+        }
+        if (oldFont != nullptr) DeleteObject(oldFont);
+        if (oldHeading != nullptr) DeleteObject(oldHeading);
+        const SIZE size = ScaledSize(dpi);
+        const int clientWidth = scale(kWidth), clientHeight = scale(kHeight);
+        WINDOWPLACEMENT placement{};
+        placement.length = sizeof(placement);
+        if (IsIconic(window) && GetWindowPlacement(window, &placement)) {
+            // A minimized window keeps its place and only gets the size it is restored to.
+            placement.rcNormalPosition.right = placement.rcNormalPosition.left + size.cx;
+            placement.rcNormalPosition.bottom = placement.rcNormalPosition.top + size.cy;
+            SetWindowPlacement(window, &placement);
+        } else {
+            // After a DPI change Windows suggests the place; at first the window is centered in the work area of its monitor.
+            MONITORINFO monitor{};
+            monitor.cbSize = sizeof(monitor);
+            GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY), &monitor);
+            const RECT work = monitor.rcWork;
+            const int x = suggested != nullptr ? suggested->left : work.left + max(0L, work.right - work.left - size.cx) / 2;
+            const int y = suggested != nullptr ? suggested->top : work.top + max(0L, work.bottom - work.top - size.cy) / 2;
+            SetWindowPos(window, nullptr, x, y, size.cx, size.cy, SWP_NOZORDER | SWP_NOACTIVATE);
+            // If the frame the system draws differs from the computed one, correct the size once so the client area fits the layout exactly.
+            RECT client{};
+            GetClientRect(window, &client);
+            if (client.right != clientWidth || client.bottom != clientHeight)
+                SetWindowPos(window, nullptr, 0, 0, size.cx + clientWidth - client.right, size.cy + clientHeight - client.bottom, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
+        }
+        RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    }
+    static LRESULT CALLBACK Proc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+        auto* self = reinterpret_cast<Launcher*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (message == kGetDpiScaledSize && self != nullptr) {
+            *reinterpret_cast<SIZE*>(lParam) = self->ScaledSize(static_cast<UINT>(wParam));
+            return TRUE;
+        }
+        if (message == WM_DPICHANGED) {
+            if (self != nullptr) self->Layout(HIWORD(wParam), reinterpret_cast<const RECT*>(lParam));
+            return 0;
+        }
+        if (message == WM_COMMAND && self != nullptr && (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)) {
+            self->play = LOWORD(wParam) == IDOK;
+            self->borderless = SendMessageW(self->mode, CB_GETCURSEL, 0, 0) == 1;
+            self->chosen = static_cast<int>(SendMessageW(self->resolution, CB_GETITEMDATA, SendMessageW(self->resolution, CB_GETCURSEL, 0, 0), 0));
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        if (message == WM_DESTROY) {
+            if (self != nullptr) self->window = nullptr;
+            PostQuitMessage(0);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+    // Shows the settings and saves them when Play is pressed; false means the player closed the launcher instead.
+    bool Run(const std::wstring& directory, HICON icon) {
+        borderless = ReadBorderless(directory);
+        // Only while the launcher window exists is this thread per-monitor DPI aware, so the window is drawn sharply at the real scaling;
+        // this runs on the main thread, so its previous DPI mode is restored afterwards. Windows before 10 1607 lack the API and keep
+        // scaling the window as a bitmap, as before.
+        const auto aware = User32<DPI_AWARENESS_CONTEXT(WINAPI*)(DPI_AWARENESS_CONTEXT)>("SetThreadDpiAwarenessContext");
+        DPI_AWARENESS_CONTEXT previous = nullptr;
+        if (aware != nullptr) {
+            if ((previous = aware(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) == nullptr) previous = aware(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+        }
+        INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES};
+        InitCommonControlsEx(&controls);
+        WNDCLASSW windowClass{};
+        windowClass.lpfnWndProc = Proc;
+        windowClass.hInstance = GetModuleHandleW(nullptr);
+        windowClass.lpszClassName = L"LauncherSettings";
+        windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+        RegisterClassW(&windowClass);
+        const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+        // Created hidden on the primary monitor so its DPI is known before the final size and position are chosen.
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(monitor);
+        GetMonitorInfoW(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), &monitor);
+        window = CreateWindowExW(0, windowClass.lpszClassName, LAUNCHER_TITLE, style, monitor.rcWork.left, monitor.rcWork.top, 0, 0, nullptr, nullptr, windowClass.hInstance, nullptr);
+        if (window == nullptr) {
+            if (previous != nullptr) aware(previous);
+            return true;
+        }
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+        if (icon != nullptr) {
+            SendMessageW(window, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon));
+            SendMessageW(window, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(icon));
+        }
+        // Positions and sizes are the 100% layout; Layout scales them and sets the fonts.
+        auto control = [&](const wchar_t* type, const wchar_t* text, DWORD flags, int x, int y, int w, int h, int id, HFONT& face) {
+            HWND handle = CreateWindowExW(0, type, text, WS_CHILD | WS_VISIBLE | flags, x, y, w, h, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), windowClass.hInstance, nullptr);
+            placed.push_back(Placed{handle, RECT{x, y, x + w, y + h}, &face});
+            return handle;
+        };
+        control(L"STATIC", L"God of War: Sons of Sparta", 0, 24, 16, 392, 34, 0, heading);
+        control(L"BUTTON", L"Display", BS_GROUPBOX, 24, 62, 392, 198, 0, font);
+        control(L"STATIC", L"Display mode", SS_CENTERIMAGE, 44, 92, 104, 28, 0, font);
+        mode = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 152, 92, 244, 200, 101, font);
+        control(L"STATIC", L"Resolution", SS_CENTERIMAGE, 44, 130, 104, 28, 0, font);
+        resolution = control(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 152, 130, 244, 200, 100, font);
+        // The help text is drawn from the top of its box; the boxes are a little taller than the text at 100% so it is not clipped at other scales.
+        control(L"STATIC", L"Lower resolutions improve GPU performance.", 0, 44, 176, 352, 24, 0, font);
+        control(L"STATIC", L"F11 switches between Windowed and Borderless Fullscreen while the game is running.", 0, 44, 208, 352, 48, 0, font);
+        HWND playButton = control(L"BUTTON", L"Play", BS_DEFPUSHBUTTON | WS_TABSTOP, 222, 276, 92, 30, IDOK, font);
+        control(L"BUTTON", L"Exit", BS_PUSHBUTTON | WS_TABSTOP, 324, 276, 92, 30, IDCANCEL, font);
+
+        SendMessageW(mode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Windowed"));
+        SendMessageW(mode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Borderless Fullscreen"));
+        SendMessageW(mode, CB_SETCURSEL, borderless ? 1 : 0, 0);
+
+        const int fromFile = ReadResolutionFile(directory);
+        const int current = fromFile >= 0 ? fromFile : ReadIntSetting(directory, kResolutionKey);
+        int selected = -1;
+        for (const auto& option : kResolutions) {
+            const auto item = SendMessageW(resolution, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(option.label));
+            SendMessageW(resolution, CB_SETITEMDATA, item, option.index);
+            if (option.index == current) selected = static_cast<int>(item);
+        }
+        if (selected < 0) {
+            selected = static_cast<int>(SendMessageW(resolution, CB_INSERTSTRING, 0, reinterpret_cast<LPARAM>(L"Keep current setting")));
+            SendMessageW(resolution, CB_SETITEMDATA, selected, -1);
+        }
+        SendMessageW(resolution, CB_SETCURSEL, selected, 0);
+
+        Layout(Dpi(window), nullptr);
+        ShowWindow(window, SW_SHOWNORMAL);
+        SetForegroundWindow(window);
+        SetFocus(playButton);
+        MSG message;
+        while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+            if (window != nullptr && IsDialogMessageW(window, &message)) continue;
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        if (previous != nullptr) aware(previous);
+        DeleteObject(font);
+        DeleteObject(heading);
+        if (play && chosen >= 0) {
+            if (!WriteIntSetting(directory, kResolutionKey, chosen)) {
+                MessageBoxW(nullptr, L"The resolution could not be saved. The game starts with its current setting.", kTitle, MB_OK | MB_ICONWARNING);
+            } else if (fromFile >= 0) {
+                MoveFileExW((directory + L"\\resolution.txt").c_str(), (directory + L"\\resolution.txt.old").c_str(), MOVEFILE_REPLACE_EXISTING);
+            }
+        }
+        if (play && borderless != ReadBorderless(directory) &&
+            !WritePrivateProfileStringW(L"Display", L"Mode", borderless ? L"Borderless" : L"Windowed", (directory + kLauncherIni).c_str())) {
+            MessageBoxW(nullptr, L"The display mode could not be saved. It is used for this start only.", kTitle, MB_OK | MB_ICONWARNING);
+        }
+        return play;
+    }
+};
+
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     HANDLE single = CreateMutexW(nullptr, TRUE, LAUNCHER_MUTEX);
     if (single != nullptr && GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -633,6 +920,30 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     CreateDirectoryW((directory + L"\\logs").c_str(), nullptr);
+
+    Gdiplus::GdiplusStartupInput gdiplusInput;
+    ULONG_PTR gdiplusToken = 0;
+    HICON gameIcon = nullptr;
+    if (Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusInput, nullptr) == Gdiplus::Ok) {
+        const std::wstring png = directory + L"\\sce_sys\\icon0.png";
+        const std::wstring ico = directory + L"\\logs\\" LAUNCHER_ICON;
+        if (Exists(png)) {
+            gameIcon = LoadGameIcon(png, ico);
+            const std::wstring link = directory + L"\\" LAUNCHER_NAME L".lnk";
+            if (!Exists(link) && SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
+                CreateShortcut(link, modulePath, directory, ico);
+                CoUninitialize();
+            }
+        }
+    }
+
+    bool borderless = false;
+    {
+        Launcher launcher;
+        if (!launcher.Run(directory, gameIcon)) return 0;
+        borderless = launcher.borderless;
+    }
+
     const std::wstring runtime = directory + L"\\" + kRuntime;
     const std::wstring stampFile = directory + L"\\prep\\prepared.stamp";
     const std::wstring stampNow = PreparedStamp(directory, executable);
@@ -678,22 +989,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
     for (const wchar_t* name : {L"Media", L"sce_sys"}) LinkIntoApp0(directory, name);
 
-    Gdiplus::GdiplusStartupInput gdiplusInput;
-    ULONG_PTR gdiplusToken = 0;
-    HICON gameIcon = nullptr;
-    if (Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusInput, nullptr) == Gdiplus::Ok) {
-        const std::wstring png = directory + L"\\sce_sys\\icon0.png";
-        const std::wstring ico = directory + L"\\logs\\" LAUNCHER_ICON;
-        if (Exists(png)) {
-            gameIcon = LoadGameIcon(png, ico);
-            const std::wstring link = directory + L"\\" LAUNCHER_NAME L".lnk";
-            if (!Exists(link) && SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
-                CreateShortcut(link, modulePath, directory, ico);
-                CoUninitialize();
-            }
-        }
-    }
-
     for (int attempt = 1;; ++attempt) {
 
     SECURITY_ATTRIBUTES inherit{sizeof(inherit), nullptr, TRUE};
@@ -708,7 +1003,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
     const std::wstring pipelineCache = directory + L"\\pipeline_cache.bin";
     SetFileAttributesW(pipelineCache.c_str(), FILE_ATTRIBUTE_NORMAL);
-    ApplyResolution(directory);
     {
 
         FILE* debug = nullptr;
@@ -729,6 +1023,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         Fail(L"The game could not be started.");
         return 1;
     }
+    // The launcher window had the foreground; pass it on so the game window opens in front.
+    AllowSetForegroundWindow(process.dwProcessId);
     CloseHandle(out);
     CloseHandle(err);
     const DWORD started = GetTickCount();
@@ -739,6 +1035,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             EnumWindows(FindGameWindow, reinterpret_cast<LPARAM>(&search));
         }
     }
+    if (borderless) RequestFullscreen(process);
 
     bool hung = false;
     WaitForSingleObject(process.hProcess, INFINITE);
