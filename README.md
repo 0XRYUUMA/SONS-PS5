@@ -2,9 +2,7 @@
 
 **God of War: Sons of Sparta for PS5, running on Windows through AnyPS5.**
 
-Made possible by the [AnyPS5](https://github.com/boykopovar/AnyPS5) project. This repository only hosts the downloadable build: no source code is included.
-
-**Download:** see the [Releases](../../releases) page.
+Made possible by the [AnyPS5](https://github.com/boykopovar/AnyPS5) project. The source code is in this repository and the build is on the [Releases](../../releases) page.
 
 ![God of War: Sons of Sparta running on Windows at 60 FPS](screenshot.jpg)
 
@@ -58,5 +56,25 @@ F11 toggles fullscreen. The middle mouse button turns mouse-aim mode on or off (
 - **Tested with:** God of War: Sons of Sparta, title ID `PPSA28997`, version `01.008.001`. Other versions, regions, patches or repacked dumps have not been tested and may not work.
 - SmartScreen may warn (*More info* → *Run anyway*). Verify with the checksum.
 - Requires Windows 10/11 64-bit and a graphics card with a Vulkan 1.3 driver. About 25 GB of free space is needed for the game files you copy in.
+
+## Building from source
+
+You need Windows 10/11, MinGW-w64 GCC 15.2 (winlibs, `x86_64-ucrt-posix-seh`), CMake 3.20 or newer, Ninja and Git. `g++`, `cmake` and `ninja` must be on your `PATH`.
+
+```
+git clone --recursive https://github.com/OverkillLabs2/SoS-PS5.git
+cd SoS-PS5
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target libs relinker SonsOfSparta-PS5
+powershell -ExecutionPolicy Bypass -File tools\package.ps1
+```
+
+The first configure downloads prebuilt FFmpeg libraries from GitHub, so it needs internet access. The first build takes a while.
+
+The result is `release\SonsOfSparta-PS5-Native-0.1.0-win64`, the same layout as the download. Copy your own game files next to `SonsOfSparta-PS5.exe` as described above.
+
+## License
+
+GNU General Public License version 2. Parts of the code derive from other GPL projects and keep their original notices in the source files.
 
 God of War is a trademark and copyright of its respective owners; this project is not affiliated with or endorsed by them.
