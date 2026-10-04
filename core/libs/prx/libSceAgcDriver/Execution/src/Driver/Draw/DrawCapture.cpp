@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/FrameDiagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include <cstdlib>
 #include <cstring>
@@ -71,7 +72,12 @@ ShaderRecompiler::RecompileResult Driver::compileDrawStage(std::size_t i, std::u
     static const bool reuseCapture = std::getenv("APS5_NO_CAPTURE_REUSE") == nullptr;
     phaseTiming.Phase(DrawRowCapture);
 
+    const auto diagnosticStart = Diagnostics::Enabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     stageCapture.compiled = reuseCapture ? ShaderRecompiler::Recompile(request, *capture) : std::make_shared<const ShaderRecompiler::RecompileResult>(ShaderRecompiler::Recompile(request));
+    if (Diagnostics::Enabled()) {
+        const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - diagnosticStart).count();
+        if (elapsed >= 10.0) Diagnostics::Report("shader", stageCapture.compiled->cacheHit ? "graphics_cache_hit" : "graphics_compiled", elapsed);
+    }
     ShaderRecompiler::RecompileResult result = *stageCapture.compiled;
     phaseTiming.Phase(DrawRowRecompile);
     return result;
