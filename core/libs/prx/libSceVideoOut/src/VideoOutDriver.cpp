@@ -1,4 +1,6 @@
 #include <bit>
+#include <algorithm>
+#include <array>
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
@@ -22,6 +24,7 @@
 #include "prx/libkernel/Time/include/Time.hpp"
 #include "prx/libSceVideoOut/include/VideoOutDriver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/FrameDiagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
@@ -470,6 +473,26 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
 
 void VideoOutDriver::presentLoop(std::stop_token token) {
     std::shared_ptr<FlipRequest> current;
+    // Diagnostic samples live on the presentation thread; no frame history is kept when disabled.
+    struct FrameSample {
+        unsigned long long frame;
+        double intervalMs;
+        double queueMs;
+        double flipMs;
+        int bufferIndex;
+    };
+    std::array<FrameSample, 120> recent{};
+    std::size_t nextSample = 0;
+    std::size_t sampleCount = 0;
+    auto reportSample = [](const FrameSample& sample) {
+        char bufferDetail[32];
+        std::snprintf(bufferDetail, sizeof(bufferDetail), "buffer_%d", sample.bufferIndex);
+        AgcDriver::Diagnostics::ReportAt(sample.frame, "frame_history", bufferDetail, sample.intervalMs);
+        AgcDriver::Diagnostics::ReportAt(sample.frame, "frame_queue", "wait", sample.queueMs);
+        AgcDriver::Diagnostics::ReportAt(sample.frame, "frame_flip", "duration", sample.flipMs);
+    };
+    auto summaryStart = AgcDriver::FrameTiming::Clock::now();
+    std::vector<double> intervals;
     try {
         PadInput padInput;
         MouseInput mouseInput;
@@ -499,6 +522,13 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
                     LibcRequestExit_nid_postfix(0);
                     throw ProcessShutdown{};
                 }
+                if (AgcDriver::Diagnostics::Enabled() && event.type == SDL_KEYDOWN &&
+                    event.key.keysym.sym == SDLK_F9 && event.key.repeat == 0) {
+                    AgcDriver::Diagnostics::Report("marker", "F9_texture_or_stutter");
+                    const auto start = (nextSample + recent.size() - sampleCount) % recent.size();
+                    for (std::size_t i = 0; i < sampleCount; ++i)
+                        reportSample(recent[(start + i) % recent.size()]);
+                }
                 padInput.HandleEvent(event, window);
                 if (window.Handle() != nullptr) {
                     mouseInput.HandleEvent(event, SDL_GetWindowID(window.Handle()));
@@ -518,6 +548,36 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
                     const auto previous = current->cfg->lastTimingFlip;
                     if (previous != AgcDriver::FrameTiming::Clock::time_point{}) interval = finished - previous;
                     current->cfg->lastTimingFlip = finished;
+                }
+                if (AgcDriver::Diagnostics::Enabled()) {
+                    const auto ms = [](AgcDriver::FrameTiming::Clock::duration duration) {
+                        return std::chrono::duration<double, std::milli>(duration).count();
+                    };
+                    const FrameSample sample{
+                        AgcDriver::Diagnostics::FrameCounter().load(std::memory_order_relaxed),
+                        ms(interval), ms(dequeued - current->queuedAt), ms(finished - dequeued), current->index
+                    };
+                    recent[nextSample] = sample;
+                    nextSample = (nextSample + 1) % recent.size();
+                    sampleCount = std::min(sampleCount + 1, recent.size());
+                    if (interval != AgcDriver::FrameTiming::Clock::duration{}) {
+                        intervals.push_back(sample.intervalMs);
+                        if (sample.intervalMs >= 30.0) reportSample(sample);
+                    }
+                    if (finished - summaryStart >= std::chrono::seconds(5)) {
+                        if (!intervals.empty()) {
+                            std::sort(intervals.begin(), intervals.end());
+                            const auto percentile = [&](double fraction) {
+                                return intervals[std::min(intervals.size() - 1,
+                                    static_cast<std::size_t>(fraction * static_cast<double>(intervals.size())))];
+                            };
+                            AgcDriver::Diagnostics::ReportAt(sample.frame, "pacing_5s", "p50_interval", percentile(0.50));
+                            AgcDriver::Diagnostics::ReportAt(sample.frame, "pacing_5s", "p95_interval", percentile(0.95));
+                            AgcDriver::Diagnostics::ReportAt(sample.frame, "pacing_5s", "max_interval", intervals.back());
+                            intervals.clear();
+                        }
+                        summaryStart = finished;
+                    }
                 }
                 current->timing->Print(current->outputHandle, current->index, current->flipArg, finished, interval);
             }

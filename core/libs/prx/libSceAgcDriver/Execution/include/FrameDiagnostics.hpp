@@ -22,7 +22,7 @@ inline unsigned long long NextFrame() {
     return FrameCounter().fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
-inline void Report(const char* category, const char* detail, double value = 0.0) {
+inline void ReportAt(unsigned long long frame, const char* category, const char* detail, double value = 0.0) {
     if (!Enabled()) return;
     static std::mutex mutex;
     static std::FILE* file = std::fopen("frame-diagnostics.log", "w");
@@ -31,9 +31,13 @@ inline void Report(const char* category, const char* detail, double value = 0.0)
         std::chrono::steady_clock::now().time_since_epoch()).count();
     std::lock_guard<std::mutex> lock(mutex);
     std::fprintf(file, "%lld frame=%llu category=%s detail=%s value_ms=%.2f\n",
-                 static_cast<long long>(now), FrameCounter().load(std::memory_order_relaxed),
+                 static_cast<long long>(now), frame,
                  category, detail, value);
     std::fflush(file);
+}
+
+inline void Report(const char* category, const char* detail, double value = 0.0) {
+    ReportAt(FrameCounter().load(std::memory_order_relaxed), category, detail, value);
 }
 
 } // namespace AgcDriver::Diagnostics
