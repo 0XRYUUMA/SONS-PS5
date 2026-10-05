@@ -476,6 +476,7 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
     // Diagnostic samples live on the presentation thread; no frame history is kept when disabled.
     struct FrameSample {
         unsigned long long frame;
+        AgcDriver::FrameTiming::Clock::time_point captured;
         double intervalMs;
         double queueMs;
         double flipMs;
@@ -484,12 +485,13 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
     std::array<FrameSample, 120> recent{};
     std::size_t nextSample = 0;
     std::size_t sampleCount = 0;
+    unsigned long long presentedFrame = 0;
     auto reportSample = [](const FrameSample& sample) {
         char bufferDetail[32];
         std::snprintf(bufferDetail, sizeof(bufferDetail), "buffer_%d", sample.bufferIndex);
-        AgcDriver::Diagnostics::ReportAt(sample.frame, "frame_history", bufferDetail, sample.intervalMs);
-        AgcDriver::Diagnostics::ReportAt(sample.frame, "frame_queue", "wait", sample.queueMs);
-        AgcDriver::Diagnostics::ReportAt(sample.frame, "frame_flip", "duration", sample.flipMs);
+        AgcDriver::Diagnostics::ReportAtTime(sample.frame, sample.captured, "frame_history", bufferDetail, sample.intervalMs);
+        AgcDriver::Diagnostics::ReportAtTime(sample.frame, sample.captured, "frame_queue", "wait", sample.queueMs);
+        AgcDriver::Diagnostics::ReportAtTime(sample.frame, sample.captured, "frame_flip", "duration", sample.flipMs);
     };
     auto summaryStart = AgcDriver::FrameTiming::Clock::now();
     std::vector<double> intervals;
@@ -497,6 +499,7 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
         PadInput padInput;
         MouseInput mouseInput;
         KeyboardInput keyboardInput;
+        AgcDriver::Diagnostics::Report("session", "videoout_start");
         while (!token.stop_requested()) {
             {
                 std::unique_lock lock(flipQueue->mutex);
@@ -554,7 +557,7 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
                         return std::chrono::duration<double, std::milli>(duration).count();
                     };
                     const FrameSample sample{
-                        AgcDriver::Diagnostics::FrameCounter().load(std::memory_order_relaxed),
+                        ++presentedFrame, finished,
                         ms(interval), ms(dequeued - current->queuedAt), ms(finished - dequeued), current->index
                     };
                     recent[nextSample] = sample;
