@@ -190,13 +190,24 @@ inline bool Encode(const Recipe& recipe, std::vector<std::byte>& out) {
     writer.value(recipe.patchPoints);
     writer.value(recipe.negativeOneToOne);
     writer.value(recipe.colorSlots);
+    std::uint64_t checksum = 14695981039346656037ull;
+    for (const auto byte : writer.bytes)
+        checksum = (checksum ^ static_cast<std::uint8_t>(byte)) * 1099511628211ull;
+    writer.value(checksum);
     if (writer.bytes.size() > MaxFileBytes) return false;
     out = std::move(writer.bytes);
     return true;
 }
 
 inline bool Decode(std::span<const std::byte> data, Recipe& recipe) {
-    Reader reader{data};
+    if (data.size() < sizeof(std::uint64_t)) return false;
+    const auto payload = data.first(data.size() - sizeof(std::uint64_t));
+    std::uint64_t checksum = 14695981039346656037ull, stored = 0;
+    for (const auto byte : payload)
+        checksum = (checksum ^ static_cast<std::uint8_t>(byte)) * 1099511628211ull;
+    std::memcpy(&stored, data.data() + payload.size(), sizeof(stored));
+    if (checksum != stored) return false;
+    Reader reader{payload};
     std::uint32_t magic = 0, version = 0, count = 0;
     if (!reader.value(magic) || !reader.value(version) || magic != Magic || version != Version ||
         !reader.list(recipe.descriptors, 128) || !reader.value(recipe.pushStages) ||
@@ -221,7 +232,11 @@ inline bool Decode(std::span<const std::byte> data, Recipe& recipe) {
     // Saved structs must not contain pointers. Refuse malformed/untrusted files.
     if (recipe.assembly.pNext || recipe.raster.pNext || recipe.samples.pNext || recipe.samples.pSampleMask ||
         recipe.depthStencil.pNext || recipe.blend.pNext || recipe.blend.pAttachments ||
-        recipe.descriptors.size() > 128 || recipe.colorSlots != recipe.colors.size()) return false;
+        recipe.descriptors.size() > 128 || recipe.colorSlots != recipe.colors.size() ||
+        recipe.assembly.sType != VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO ||
+        recipe.raster.sType != VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO ||
+        recipe.samples.sType != VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO ||
+        recipe.blend.sType != VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO) return false;
     for (const auto& binding : recipe.descriptors) if (binding.pImmutableSamplers) return false;
     return true;
 }
