@@ -1,5 +1,6 @@
 #include <set>
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PipelineWarmup.hpp"
 #include "prx/common/StderrLog.hpp"
 #include "prx/libSceAgcDriver/Execution/include/FrameDiagnostics.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
@@ -207,6 +208,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
         pipelineInfo.renderPass = renderPass;
         const auto buildStart = std::chrono::steady_clock::now();
         Check(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &pipelineInfo, nullptr, &pipeline), "vkCreateGraphicsPipelines");
+        PipelineWarmup::Record(resources, shaders, passInfo, layoutInfo, pipelineInfo);
         {
 
             static const bool trace = std::getenv("APS5_TRACE_PIPELINES") != nullptr;

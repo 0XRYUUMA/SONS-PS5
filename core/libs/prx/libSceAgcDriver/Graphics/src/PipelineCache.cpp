@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/PipelineCache.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PipelineWarmup.hpp"
 #include "prx/common/StderrLog.hpp"
 #include "ShaderCacheDirectory.hpp"
 #include <chrono>
@@ -59,6 +60,13 @@ PipelineCache::PipelineCache(const Context& context, const VkPhysicalDevicePrope
         result = create(context.device, &info, nullptr, &cache);
     }
     Check(result, "vkCreatePipelineCache");
+    PipelineWarmup::Configure(properties);
+    if (std::getenv("APS5_PRECOMPILE_PIPELINES") != nullptr) {
+        const auto started = std::chrono::steady_clock::now();
+        const auto [warmed, failed] = PipelineWarmup::Warm(context, cache);
+        aps5::LogErr("[precompile] rebuilt %zu known graphics pipelines, %zu failed in %.1f s\n",
+                     warmed, failed, std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+    }
     if (!path.empty()) saver = std::thread([this] { run(); });
 }
 

@@ -10,6 +10,7 @@ if (Test-Path $out) { Remove-Item -Recurse -Force $out }
 New-Item -ItemType Directory -Force "$out\libs", "$out\tools" | Out-Null
 Copy-Item "$build\SonsOfSparta-PS5.exe" $out
 Copy-Item "$repo\tools\Diagnosticar.cmd" $out
+Copy-Item "$repo\tools\PrepararShaders.cmd" $out
 Copy-Item "$build\core\relinker\relinker.exe" "$out\tools"
 Copy-Item "$build\core\libs\libs\*.prx" "$out\libs"
 $gpp = (Get-Command g++).Source
