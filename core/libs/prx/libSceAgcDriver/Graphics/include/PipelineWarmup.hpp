@@ -4,14 +4,18 @@
 #include "ShaderCacheDirectory.hpp"
 #include <algorithm>
 #include <array>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <mutex>
 #include <optional>
 #include <span>
+#include <thread>
 #include <type_traits>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -106,6 +110,58 @@ inline void Configure(const VkPhysicalDeviceProperties& properties) {
     directory() = root / name;
 }
 
+class WriteQueue {
+public:
+    WriteQueue() : worker([this] { run(); }) {}
+    ~WriteQueue() {
+        { std::lock_guard lock(mutex); stopping = true; }
+        changed.notify_one();
+        worker.join();
+    }
+    void submit(std::filesystem::path path, std::vector<std::byte> bytes) {
+        std::lock_guard lock(mutex);
+        if (!counted) {
+            counted = true;
+            std::error_code error;
+            for (std::filesystem::directory_iterator it(path.parent_path(), error), end; !error && it != end; it.increment(error))
+                if (it->path().extension() == ".bin") ++existing;
+        }
+        if (seen.contains(path.string()) || existing + seen.size() >= MaxRecipes) return;
+        seen.insert(path.string());
+        pending.emplace_back(std::move(path), std::move(bytes));
+        changed.notify_one();
+    }
+private:
+    void run() {
+        for (;;) {
+            std::pair<std::filesystem::path, std::vector<std::byte>> entry;
+            {
+                std::unique_lock lock(mutex);
+                changed.wait(lock, [this] { return stopping || !pending.empty(); });
+                if (pending.empty() && stopping) return;
+                entry = std::move(pending.front());
+                pending.pop_front();
+            }
+            std::error_code error;
+            if (!std::filesystem::exists(entry.first, error))
+                ShaderRecompiler::WriteFileAtomically(entry.first, entry.second);
+        }
+    }
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::deque<std::pair<std::filesystem::path, std::vector<std::byte>>> pending;
+    std::unordered_set<std::string> seen;
+    std::size_t existing = 0;
+    bool counted = false;
+    bool stopping = false;
+    std::thread worker;
+};
+
+inline WriteQueue& writes() {
+    static WriteQueue queue;
+    return queue;
+}
+
 inline bool Encode(const Recipe& recipe, std::vector<std::byte>& out) {
     Writer writer;
     writer.value(Magic);
@@ -173,8 +229,9 @@ inline bool Decode(std::span<const std::byte> data, Recipe& recipe) {
 inline void Record(const ShaderResources& resources, std::span<const CompiledShader> shaders,
                    const VkRenderPassCreateInfo& pass, const VkPipelineLayoutCreateInfo& layout,
                    const VkGraphicsPipelineCreateInfo& pipeline) {
-    std::lock_guard lock(mutex());
-    if (directory().empty() || pipeline.stageCount != shaders.size() || shaders.empty() ||
+    std::filesystem::path root;
+    { std::lock_guard lock(mutex()); root = directory(); }
+    if (root.empty() || pipeline.stageCount != shaders.size() || shaders.empty() ||
         pipeline.pTessellationState || pipeline.pVertexInputState == nullptr ||
         pipeline.pViewportState == nullptr ||
         (pipeline.pViewportState->pNext != nullptr &&
@@ -230,13 +287,7 @@ inline void Record(const ShaderResources& resources, std::span<const CompiledSha
     for (const auto byte : encoded) hash = (hash ^ static_cast<std::uint8_t>(byte)) * 1099511628211ull;
     char filename[32]{};
     std::snprintf(filename, sizeof(filename), "%016llx.bin", static_cast<unsigned long long>(hash));
-    std::error_code error;
-    if (std::filesystem::exists(directory() / filename, error)) return;
-    // Bound disk use and startup duration. Additional recipes can be supported later.
-    std::size_t files = 0;
-    for (std::filesystem::directory_iterator it(directory(), error), end; !error && it != end; it.increment(error))
-        if (++files >= MaxRecipes) return;
-    ShaderRecompiler::WriteFileAtomically(directory() / filename, encoded);
+    writes().submit(root / filename, std::move(encoded));
 }
 
 inline std::pair<std::size_t, std::size_t> Warm(const Context& context, VkPipelineCache cache) {
